@@ -1,45 +1,330 @@
+<script setup lang="ts">
+import { useFieldsStore } from '@/stores/fields';
+import { useRelationsStore } from '@/stores/relations';
+import { extractFieldFromFunction } from '@/utils/extract-field-from-function';
+import { useSync } from '@directus/composables';
+import {
+	FieldFilter,
+	FieldFilterOperator,
+	FieldFunction,
+	Filter,
+	LogicalFilterAND,
+	LogicalFilterOR,
+	Type,
+} from '@directus/types';
+import { getFilterOperatorsForType, getOutputTypeForFunction, toArray } from '@directus/utils';
+import { get } from 'lodash';
+import { computed, toRefs } from 'vue';
+import { useI18n } from 'vue-i18n';
+import Draggable from 'vuedraggable';
+import InputGroup from './input-group.vue';
+import { fieldHasFunction, fieldToFilter, getComparator, getField, getNodeName } from './utils';
+
+type FilterInfo = {
+	id: number;
+	isField: false;
+	name: string;
+	node: Filter;
+};
+
+type FilterInfoField = {
+	id: number;
+	isField: true;
+	name: string;
+	node: Filter;
+	field: string;
+	comparator: string;
+};
+
+interface Props {
+	filter: Filter[];
+	collection: string;
+	field?: string;
+	depth?: number;
+	inline?: boolean;
+	includeValidation?: boolean;
+	includeRelations?: boolean;
+	relationalFieldSelectable?: boolean;
+	rawFieldNames?: boolean;
+}
+
+const props = withDefaults(defineProps<Props>(), {
+	field: undefined,
+	depth: 1,
+	inline: false,
+	includeValidation: false,
+	includeRelations: true,
+	relationalFieldSelectable: true,
+	rawFieldNames: false,
+});
+
+const emit = defineEmits(['remove-node', 'update:filter', 'change']);
+
+const { collection } = toRefs(props);
+const filterSync = useSync(props, 'filter', emit);
+const fieldsStore = useFieldsStore();
+const relationsStore = useRelationsStore();
+const { t } = useI18n();
+
+const filterInfo = computed<(FilterInfo | FilterInfoField)[]>({
+	get() {
+		return props.filter.map((node, id) => {
+			const name = getNodeName(node);
+			const isField = name.startsWith('_') === false;
+
+			return isField
+				? ({
+						id,
+						isField,
+						name,
+						field: getField(node),
+						comparator: getComparator(node),
+						node,
+				  } as FilterInfoField)
+				: ({ id, name, isField, node } as FilterInfo);
+		});
+	},
+	set(newVal) {
+		emit(
+			'update:filter',
+			newVal.map((val) => val.node),
+		);
+	},
+});
+
+function getFieldPreview(node: Record<string, any>) {
+	const fieldKey = getField(node);
+
+	const fieldParts = fieldKey.split('.');
+
+	const fieldNames = fieldParts.map((fieldKey, index) => {
+		const hasFunction = fieldHasFunction(fieldKey);
+
+		let key = fieldKey;
+		let functionName;
+
+		if (hasFunction) {
+			const { field, fn } = extractFieldFromFunction(fieldKey);
+			functionName = fn;
+			key = field;
+		}
+
+		const pathPrefix = fieldParts.slice(0, index);
+		const field = fieldsStore.getField(props.collection, [...pathPrefix, key].join('.'));
+
+		const name = (props.rawFieldNames ? field?.field : field?.name) ?? key;
+
+		if (hasFunction) {
+			return t(`functions.${functionName}`) + ` (${name})`;
+		}
+
+		return name;
+	});
+
+	return fieldNames.join(' -> ');
+}
+
+function getIndex(item: Filter) {
+	return props.filter.findIndex((filter) => filter === item);
+}
+
+function toggleLogic(index: number) {
+	const nodeInfo = filterInfo.value[index];
+
+	if (filterInfo.value[index].isField) return;
+
+	if ('_and' in nodeInfo.node) {
+		filterSync.value = filterSync.value.map((filter, filterIndex) => {
+			if (filterIndex === index) {
+				return { _or: (nodeInfo.node as LogicalFilterAND)._and as FieldFilter[] };
+			}
+
+			return filter;
+		});
+	} else {
+		filterSync.value = filterSync.value.map((filter, filterIndex) => {
+			if (filterIndex === index) {
+				return { _and: (nodeInfo.node as LogicalFilterOR)._or as FieldFilter[] };
+			}
+
+			return filter;
+		});
+	}
+}
+
+function updateComparator(index: number, operator: keyof FieldFilterOperator) {
+	const nodeInfo = filterInfo.value[index];
+	if (nodeInfo.isField === false) return;
+
+	const valuePath = nodeInfo.field + '.' + nodeInfo.comparator;
+	const value = get(nodeInfo.node, valuePath);
+
+	switch (operator) {
+		case '_in':
+		case '_nin':
+			update(toArray(value) || []);
+			break;
+		case '_between':
+		case '_nbetween':
+			update((toArray(value) || []).slice(0, 2));
+			break;
+		case '_null':
+		case '_nnull':
+		case '_empty':
+		case '_nempty':
+			update(true);
+			break;
+		case '_intersects':
+		case '_nintersects':
+		case '_intersects_bbox':
+		case '_nintersects_bbox':
+			if (['_intersects', '_nintersects', '_intersects_bbox', '_nintersects_bbox'].includes(nodeInfo.comparator)) {
+				update(value);
+			} else {
+				update(null);
+			}
+
+			break;
+		default:
+			// avoid setting value as string 'true'/'false' when switching from null/empty operators
+			if (['_null', '_nnull', '_empty', '_nempty'].includes(nodeInfo.comparator)) {
+				update(null);
+			} else {
+				update(Array.isArray(value) ? value[0] : value);
+			}
+
+			break;
+	}
+
+	function update(value: any) {
+		if (nodeInfo.isField === false) return;
+
+		filterSync.value = filterSync.value.map((filter, filterIndex) => {
+			if (filterIndex === index) return fieldToFilter(nodeInfo.field, operator, value);
+			return filter;
+		});
+	}
+}
+
+function updateField(index: number, newField: string) {
+	const nodeInfo = filterInfo.value[index];
+	const oldFieldInfo = fieldsStore.getField(props.collection, nodeInfo.name);
+	const newFieldInfo = fieldsStore.getField(props.collection, newField);
+
+	if (nodeInfo.isField === false) return;
+
+	const valuePath = nodeInfo.field + '.' + nodeInfo.comparator;
+	let value = get(nodeInfo.node, valuePath);
+	let comparator = nodeInfo.comparator;
+
+	if (oldFieldInfo?.type !== newFieldInfo?.type) {
+		value = null;
+		comparator = getCompareOptions(newField)[0].value;
+	}
+
+	filterSync.value = filterSync.value.map((filter, filterIndex) => {
+		if (filterIndex === index) return fieldToFilter(newField, comparator, value);
+		return filter;
+	});
+}
+
+function replaceNode(index: number, newFilter: Filter) {
+	filterSync.value = filterSync.value.map((val, filterIndex) => {
+		if (filterIndex === index) return newFilter;
+		return val;
+	});
+}
+
+function getCompareOptions(name: string) {
+	let type: Type;
+
+	if (fieldHasFunction(name)) {
+		const functionName = name.split('(')[0] as FieldFunction;
+		type = getOutputTypeForFunction(functionName);
+	} else {
+		const fieldInfo = fieldsStore.getField(props.collection, name);
+		type = fieldInfo?.type || 'unknown';
+
+		// Alias uses the foreign key type
+		if (type === 'alias') {
+			const relations = relationsStore.getRelationsForField(props.collection, name);
+
+			if (relations[0]) {
+				type = fieldsStore.getField(relations[0].collection, relations[0].field)?.type || 'unknown';
+			}
+		}
+	}
+
+	return getFilterOperatorsForType(type, { includeValidation: props.includeValidation }).map((type) => ({
+		text: t(`operators.${type}`),
+		value: `_${type}`,
+	}));
+}
+
+function isExistingField(node: Record<string, any>): boolean {
+	if (!props.collection) return false;
+	let fieldKey = getField(node);
+
+	if (fieldHasFunction(fieldKey)) {
+		const keyParts = fieldKey.split('.');
+		// the function is always in the last key part
+		const { field } = extractFieldFromFunction(keyParts.at(-1)!);
+		fieldKey = [...keyParts.slice(0, -1), field].join('.');
+	}
+
+	const field = fieldsStore.getField(props.collection, fieldKey);
+	return !!field;
+}
+</script>
+
 <template>
 	<draggable
-		:group="{ name: 'g1' }"
-		:list="filter"
+		tag="ul"
 		draggable=".row"
 		handle=".drag-handle"
-		:item-key="getIndex"
-		tag="ul"
-		:swap-threshold="0.3"
 		class="group"
+		:list="filterSync"
+		:group="{ name: 'g1' }"
+		:item-key="getIndex"
+		:swap-threshold="0.3"
+		v-bind="{ 'force-fallback': true }"
+		@change="$emit('change')"
 	>
 		<template #item="{ element, index }">
 			<li class="row">
 				<div v-if="filterInfo[index].isField" block class="node field">
-					<div class="header">
+					<div class="header" :class="{ inline, 'raw-field-names': rawFieldNames }">
 						<v-icon name="drag_indicator" class="drag-handle" small></v-icon>
-						<v-select
-							v-tooltip.monospace="filterInfo[index].field"
-							inline
-							class="name"
-							item-text="name"
-							item-value="key"
-							placement="bottom-start"
-							:full-width="false"
-							:model-value="filterInfo[index].field"
-							:items="fieldOptions"
-							:mandatory="false"
-							:groups-clickable="true"
-							@group-toggle="loadFieldRelations($event.value, 1)"
-							@update:modelValue="updateField(index, $event)"
-						>
-							<template #preview>{{ getFieldPreview(element) }}</template>
-						</v-select>
+						<span v-if="field || !isExistingField(element)" class="plain-name">
+							{{ getFieldPreview(element) }}
+						</span>
+						<v-menu v-else placement="bottom-start" show-arrow>
+							<template #activator="{ toggle }">
+								<button class="name" @click="toggle">
+									<span>{{ getFieldPreview(element) }}</span>
+								</button>
+							</template>
+
+							<v-field-list
+								:collection="collection"
+								:field="field"
+								include-functions
+								:include-relations="includeRelations"
+								:relational-field-selectable="relationalFieldSelectable"
+								:allow-select-all="false"
+								:raw-field-names="rawFieldNames"
+								@add="updateField(index, $event[0])"
+							/>
+						</v-menu>
 						<v-select
 							inline
 							class="comparator"
 							placement="bottom-start"
-							:model-value="filterInfo[index].comparator"
-							:items="getCompareOptions(filterInfo[index].field)"
-							@update:modelValue="updateComparator(index, $event)"
+							:model-value="(filterInfo[index] as FilterInfoField).comparator"
+							:items="getCompareOptions((filterInfo[index] as FilterInfoField).field)"
+							@update:model-value="updateComparator(index, $event)"
 						/>
-						<input-group :field="element" :collection="collection" @update:field="updateNode(index, $event)" />
+						<input-group :field="element" :collection="collection" @update:field="replaceNode(index, $event)" />
 						<span class="delete">
 							<v-icon
 								v-tooltip="t('delete_label')"
@@ -53,13 +338,23 @@
 				</div>
 
 				<div v-else class="node logic">
-					<div class="header">
+					<div class="header" :class="{ inline }">
 						<v-icon name="drag_indicator" class="drag-handle" small />
 						<div class="logic-type" :class="{ or: filterInfo[index].name === '_or' }">
 							<span class="key" @click="toggleLogic(index)">
-								{{ filterInfo[index].name === '_and' ? t('interfaces.filter.all') : t('interfaces.filter.any') }}
+								{{
+									filterInfo[index].name === '_and'
+										? t('interfaces.filter.logic_type_and')
+										: t('interfaces.filter.logic_type_or')
+								}}
 							</span>
-							<span class="text">{{ t('interfaces.filter.of_the_following') }}</span>
+							<span class="text">
+								{{
+									`— ${filterInfo[index].name === '_and' ? t('interfaces.filter.all') : t('interfaces.filter.any')} ${t(
+										'interfaces.filter.of_the_following',
+									)}`
+								}}
+							</span>
 						</div>
 						<span class="delete">
 							<v-icon
@@ -75,8 +370,11 @@
 						:filter="element[filterInfo[index].name]"
 						:collection="collection"
 						:depth="depth + 1"
+						:inline="inline"
+						:raw-field-names="rawFieldNames"
+						@change="$emit('change')"
 						@remove-node="$emit('remove-node', [`${index}.${filterInfo[index].name}`, ...$event])"
-						@update:filter="updateNode(index, { [filterInfo[index].name]: $event })"
+						@update:filter="replaceNode(index, { [filterInfo[index].name]: $event })"
 					/>
 				</div>
 			</li>
@@ -84,228 +382,41 @@
 	</draggable>
 </template>
 
-<script lang="ts">
-import { useFieldTree } from '@/composables/use-field-tree';
-import { computed, defineComponent, PropType, toRefs } from 'vue';
-import InputGroup from './input-group.vue';
-import Draggable from 'vuedraggable';
-import { useFieldsStore } from '@/stores';
-import { useI18n } from 'vue-i18n';
-import { getFilterOperatorsForType } from '@directus/shared/utils';
-import { get } from 'lodash';
-import { FieldFilter, Filter, FilterOperator } from '@directus/shared/types';
-import { useSync } from '@directus/shared/composables';
-import { fieldToFilter, getField, getNodeName, getComparator } from './utils';
-
-type FilterInfo =
-	| {
-			id: number;
-			isField: true;
-			name: string;
-			node: Filter;
-			field: string;
-			comparator: string;
-	  }
-	| {
-			id: number;
-			isField: false;
-			name: string;
-			node: Filter;
-	  };
-
-export default defineComponent({
-	name: 'Nodes',
-	components: {
-		Draggable,
-		InputGroup,
-	},
-	props: {
-		filter: {
-			type: Object as PropType<Filter[]>,
-			required: true,
-		},
-		collection: {
-			type: String,
-			required: true,
-		},
-		depth: {
-			type: Number,
-			default: 1,
-		},
-	},
-	emits: ['remove-node', 'update:filter'],
-	setup(props, { emit }) {
-		const { collection } = toRefs(props);
-		const filterSync = useSync(props, 'filter', emit);
-		const { treeList: fieldOptions, loadFieldRelations } = useFieldTree(collection);
-		const fieldsStore = useFieldsStore();
-		const { t } = useI18n();
-
-		const filterInfo = computed<FilterInfo[]>({
-			get() {
-				return props.filter.map((node, id) => {
-					const name = getNodeName(node);
-					const isField = name.startsWith('_') === false;
-
-					return isField
-						? {
-								id,
-								isField,
-								name,
-								field: getField(node),
-								comparator: getComparator(node),
-								node,
-						  }
-						: { id, name, isField, node };
-				});
-			},
-			set(newVal) {
-				emit(
-					'update:filter',
-					newVal.map((val) => val.node)
-				);
-			},
-		});
-
-		return {
-			fieldOptions,
-			getCompareOptions,
-			updateField,
-			updateComparator,
-			t,
-			updateNode,
-			toggleLogic,
-			loadFieldRelations,
-			getNodeName,
-			getField,
-			getComparator,
-			filterInfo,
-			getIndex,
-			getFieldPreview,
-		};
-
-		function getFieldPreview(node: Record<string, any>) {
-			const fieldKey = getField(node);
-
-			const fieldParts = fieldKey.split('.');
-
-			const fieldNames = fieldParts.map((fieldKey, index) => {
-				const pathPrefix = fieldParts.slice(0, index);
-				const field = fieldsStore.getField(props.collection, [...pathPrefix, fieldKey].join('.'));
-				return field?.name ?? fieldKey;
-			});
-
-			return fieldNames.join(' -> ');
-		}
-
-		function getIndex(item: Filter) {
-			return props.filter.findIndex((filter) => filter === item);
-		}
-
-		function toggleLogic(index: number) {
-			const nodeInfo = filterInfo.value[index];
-			if (nodeInfo.isField) return;
-
-			if ('_and' in nodeInfo.node) {
-				filterSync.value[index] = { _or: nodeInfo.node._and as FieldFilter[] };
-			} else {
-				filterSync.value[index] = { _and: nodeInfo.node._or as FieldFilter[] };
-			}
-		}
-
-		function updateComparator(index: number, newVal: FilterOperator) {
-			const nodeInfo = filterInfo.value[index];
-			if (nodeInfo.isField === false) return;
-
-			const valuePath = nodeInfo.field + '.' + nodeInfo.comparator;
-			const value = get(nodeInfo.node, valuePath);
-
-			if (['_in', '_nin'].includes(newVal)) {
-				if (Array.isArray(value) === false) update([value]);
-			} else if (['_between', '_nbetween'].includes(newVal)) {
-				if (Array.isArray(value) && value.length >= 2) update([value[0], value[1]]);
-				else update([null, null]);
-			} else if (Array.isArray(value) && value.length > 0) {
-				update(value[0]);
-			} else {
-				update(value);
-			}
-
-			function update(value: any) {
-				if (nodeInfo.isField === false) return;
-				filterSync.value[index] = fieldToFilter(nodeInfo.field, newVal, value);
-			}
-		}
-
-		function updateField(index: number, newField: string) {
-			const nodeInfo = filterInfo.value[index];
-			const oldFieldInfo = fieldsStore.getField(props.collection, nodeInfo.name);
-			const newFieldInfo = fieldsStore.getField(props.collection, newField);
-
-			if (nodeInfo.isField === false) return;
-
-			const valuePath = nodeInfo.field + '.' + nodeInfo.comparator;
-			let value = get(nodeInfo.node, valuePath);
-			let comparator = nodeInfo.comparator;
-
-			if (oldFieldInfo?.type !== newFieldInfo?.type) {
-				value = null;
-				comparator = getCompareOptions(newField)[0].value;
-			}
-
-			filterSync.value[index] = fieldToFilter(newField, comparator, value);
-		}
-
-		function updateNode(index: number, field: Filter) {
-			filterSync.value = filterSync.value.map((val, i) => (i === index ? field : val));
-		}
-
-		function getCompareOptions(name: string) {
-			const fieldInfo = fieldsStore.getField(props.collection, name);
-			if (fieldInfo === null) return [];
-			return getFilterOperatorsForType(fieldInfo.type).map((type) => ({
-				text: t(`operators.${type}`),
-				value: `_${type}`,
-			}));
-		}
-	},
-});
-</script>
-
 <style lang="scss" scoped>
 .header {
 	position: relative;
 	display: flex;
 	align-items: center;
 	width: fit-content;
+	margin-right: 18px;
 	margin-bottom: 8px;
 	padding: 2px 6px;
 	padding-right: 8px;
-	background-color: var(--background-page);
-	border: var(--border-width) solid var(--border-subdued);
+	background-color: var(--theme--form--field--input--background);
+	border: var(--theme--border-width) solid var(--theme--border-color-subdued);
 	border-radius: 100px;
 	transition: border-color var(--fast) var(--transition);
 
 	.logic-type {
-		color: var(--foreground-subdued);
+		color: var(--theme--form--field--input--foreground-subdued);
 
 		.key {
 			margin-right: 4px;
 			padding: 2px 6px;
-			color: var(--primary);
-			background-color: var(--primary-alt);
+			color: var(--theme--primary);
+			background-color: var(--theme--primary-background);
 			border-radius: 6px;
 			cursor: pointer;
 			transition: var(--fast) var(--transition);
 			transition-property: color, background-color;
 
 			&:hover {
-				background-color: var(--primary-25);
+				background-color: var(--theme--primary-subdued);
 			}
 		}
 
 		&.or .key {
-			color: var(--secondary);
+			color: var(--theme--secondary);
 			background-color: var(--secondary-alt);
 
 			&:hover {
@@ -319,6 +430,23 @@ export default defineComponent({
 
 		.v-icon {
 			display: none;
+		}
+	}
+
+	.plain-name {
+		display: inline-block;
+		margin-right: 8px;
+		white-space: nowrap;
+	}
+
+	.name {
+		white-space: nowrap;
+	}
+
+	&.raw-field-names {
+		.plain-name,
+		.name {
+			font-family: var(--theme--fonts--monospace--font-family);
 		}
 	}
 
@@ -336,7 +464,7 @@ export default defineComponent({
 			z-index: -1;
 			width: calc(100% + 8px);
 			height: 100%;
-			background-color: var(--background-normal);
+			background-color: var(--theme--background-normal);
 			border-radius: 6px;
 			opacity: 0;
 			transition: opacity var(--fast) var(--transition);
@@ -344,7 +472,7 @@ export default defineComponent({
 			pointer-events: none;
 		}
 
-		&:hover::before {
+		&:not(.disabled):hover::before {
 			opacity: 1;
 		}
 	}
@@ -358,8 +486,8 @@ export default defineComponent({
 	}
 
 	.delete {
-		--v-icon-color: var(--foreground-subdued);
-		--v-icon-color-hover: var(--danger);
+		--v-icon-color: var(--theme--form--field--input--foreground-subdued);
+		--v-icon-color-hover: var(--theme--danger);
 
 		position: absolute;
 		top: 50%;
@@ -371,7 +499,7 @@ export default defineComponent({
 	}
 
 	&:hover {
-		border-color: var(--border-normal);
+		border-color: var(--theme--form--field--input--border-color);
 
 		.delete,
 		&:hover {
@@ -380,17 +508,40 @@ export default defineComponent({
 	}
 
 	.drag-handle {
-		--v-icon-color: var(--foreground-subdued);
+		--v-icon-color: var(--theme--form--field--input--foreground-subdued);
 
 		margin-right: 4px;
 		cursor: grab;
+	}
+
+	&.inline {
+		width: auto;
+		margin-right: 0;
+		padding-right: 12px;
+
+		.delete {
+			right: 8px;
+			left: unset;
+			background-color: var(--theme--background);
+		}
+	}
+}
+
+.node {
+	&.logic {
+		padding-right: 4px;
+		white-space: nowrap;
+	}
+
+	&.field {
+		padding-right: 4px;
 	}
 }
 
 .group :deep(.sortable-ghost) {
 	.node .header {
-		background-color: var(--primary-alt);
-		border-color: var(--primary);
+		background-color: var(--theme--primary-background);
+		border-color: var(--theme--form--field--input--border-color-focus);
 
 		> * {
 			opacity: 0;

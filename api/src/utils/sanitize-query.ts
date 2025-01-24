@@ -1,75 +1,96 @@
-import { flatten, get, merge, set } from 'lodash';
-import logger from '../logger';
-import { Aggregate, Filter, Meta, Query, Sort } from '../types';
-import { Accountability } from '@directus/shared/types';
-import { parseFilter, deepMap } from '@directus/shared/utils';
+import { useEnv } from '@directus/env';
+import { InvalidQueryError } from '@directus/errors';
+import type { Accountability, Aggregate, Query } from '@directus/types';
+import { parseFilter, parseJSON } from '@directus/utils';
+import { flatten, get, isPlainObject, merge, set } from 'lodash-es';
+import { useLogger } from '../logger/index.js';
+import { Meta } from '../types/index.js';
 
 export function sanitizeQuery(rawQuery: Record<string, any>, accountability?: Accountability | null): Query {
+	const env = useEnv();
+
 	const query: Query = {};
 
-	if (rawQuery.limit !== undefined) {
-		const limit = sanitizeLimit(rawQuery.limit);
+	const hasMaxLimit =
+		'QUERY_LIMIT_MAX' in env &&
+		Number(env['QUERY_LIMIT_MAX']) >= 0 &&
+		!Number.isNaN(Number(env['QUERY_LIMIT_MAX'])) &&
+		Number.isFinite(Number(env['QUERY_LIMIT_MAX']));
+
+	if (rawQuery['limit'] !== undefined) {
+		const limit = sanitizeLimit(rawQuery['limit']);
 
 		if (typeof limit === 'number') {
-			query.limit = limit;
+			query.limit = limit === -1 && hasMaxLimit ? Number(env['QUERY_LIMIT_MAX']) : limit;
 		}
+	} else if (hasMaxLimit) {
+		query.limit = Math.min(Number(env['QUERY_LIMIT_DEFAULT']), Number(env['QUERY_LIMIT_MAX']));
 	}
 
-	if (rawQuery.fields) {
-		query.fields = sanitizeFields(rawQuery.fields);
+	if (rawQuery['fields']) {
+		query.fields = sanitizeFields(rawQuery['fields']);
 	}
 
-	if (rawQuery.groupBy) {
-		query.group = sanitizeFields(rawQuery.groupBy);
+	if (rawQuery['groupBy']) {
+		query.group = sanitizeFields(rawQuery['groupBy']);
 	}
 
-	if (rawQuery.aggregate) {
-		query.aggregate = sanitizeAggregate(rawQuery.aggregate);
+	if (rawQuery['aggregate']) {
+		query.aggregate = sanitizeAggregate(rawQuery['aggregate']);
 	}
 
-	if (rawQuery.sort) {
-		query.sort = sanitizeSort(rawQuery.sort);
+	if (rawQuery['sort']) {
+		query.sort = sanitizeSort(rawQuery['sort']);
 	}
 
-	if (rawQuery.filter) {
-		query.filter = sanitizeFilter(rawQuery.filter, accountability || null);
+	if (rawQuery['filter']) {
+		query.filter = sanitizeFilter(rawQuery['filter'], accountability || null);
 	}
 
-	if (rawQuery.offset) {
-		query.offset = sanitizeOffset(rawQuery.offset);
+	if (rawQuery['offset'] !== undefined) {
+		query.offset = sanitizeOffset(rawQuery['offset']);
 	}
 
-	if (rawQuery.page) {
-		query.page = sanitizePage(rawQuery.page);
+	if (rawQuery['page']) {
+		query.page = sanitizePage(rawQuery['page']);
 	}
 
-	if (rawQuery.meta) {
-		query.meta = sanitizeMeta(rawQuery.meta);
+	if (rawQuery['meta']) {
+		(query as any).meta = sanitizeMeta(rawQuery['meta']);
 	}
 
-	if (rawQuery.search && typeof rawQuery.search === 'string') {
-		query.search = rawQuery.search;
+	if (rawQuery['search'] && typeof rawQuery['search'] === 'string') {
+		query.search = rawQuery['search'];
 	}
 
-	if (rawQuery.export) {
-		query.export = rawQuery.export as 'json' | 'csv';
+	if (rawQuery['version']) {
+		query.version = rawQuery['version'];
+
+		// whether or not to merge the relational results
+		query.versionRaw = Boolean(
+			'versionRaw' in rawQuery && (rawQuery['versionRaw'] === '' || rawQuery['versionRaw'] === 'true'),
+		);
 	}
 
-	if (rawQuery.deep as Record<string, any>) {
+	if (rawQuery['export']) {
+		query.export = rawQuery['export'] as 'json' | 'csv';
+	}
+
+	if (rawQuery['deep'] as Record<string, any>) {
 		if (!query.deep) query.deep = {};
 
-		query.deep = sanitizeDeep(rawQuery.deep, accountability);
+		query.deep = sanitizeDeep(rawQuery['deep'], accountability);
 	}
 
-	if (rawQuery.alias) {
-		query.alias = sanitizeAlias(rawQuery.alias);
+	if (rawQuery['alias']) {
+		query.alias = sanitizeAlias(rawQuery['alias']);
 	}
 
 	return query;
 }
 
 function sanitizeFields(rawFields: any) {
-	if (!rawFields) return;
+	if (!rawFields) return null;
 
 	let fields: string[] = [];
 
@@ -90,21 +111,21 @@ function sanitizeSort(rawSort: any) {
 	if (typeof rawSort === 'string') fields = rawSort.split(',');
 	else if (Array.isArray(rawSort)) fields = rawSort as string[];
 
-	return fields.map((field) => {
-		const order = field.startsWith('-') ? 'desc' : 'asc';
-		const column = field.startsWith('-') ? field.substring(1) : field;
-		return { column, order } as Sort;
-	});
+	fields = fields.map((field) => field.trim());
+
+	return fields;
 }
 
 function sanitizeAggregate(rawAggregate: any): Aggregate {
+	const logger = useLogger();
+
 	let aggregate: Aggregate = rawAggregate;
 
 	if (typeof rawAggregate === 'string') {
 		try {
-			aggregate = JSON.parse(rawAggregate);
+			aggregate = parseJSON(rawAggregate);
 		} catch {
-			logger.warn('Invalid value passed for filter query parameter.');
+			logger.warn('Invalid value passed for aggregate query parameter.');
 		}
 	}
 
@@ -117,31 +138,21 @@ function sanitizeAggregate(rawAggregate: any): Aggregate {
 }
 
 function sanitizeFilter(rawFilter: any, accountability: Accountability | null) {
-	let filters: Filter = rawFilter;
+	let filters = rawFilter;
 
-	if (typeof rawFilter === 'string') {
+	if (typeof filters === 'string') {
 		try {
-			filters = JSON.parse(rawFilter);
+			filters = parseJSON(filters);
 		} catch {
-			logger.warn('Invalid value passed for filter query parameter.');
+			throw new InvalidQueryError({ reason: 'Invalid JSON for filter object' });
 		}
 	}
 
-	filters = deepMap(filters, (val) => {
-		try {
-			const parsed = JSON.parse(val);
-
-			if (typeof parsed == 'number' && !Number.isSafeInteger(parsed)) return val;
-
-			return parsed;
-		} catch {
-			return val;
-		}
-	});
-
-	filters = parseFilter(filters, accountability);
-
-	return filters;
+	try {
+		return parseFilter(filters, accountability);
+	} catch {
+		throw new InvalidQueryError({ reason: 'Invalid filter object' });
+	}
 }
 
 function sanitizeLimit(rawLimit: any) {
@@ -174,11 +185,13 @@ function sanitizeMeta(rawMeta: any) {
 }
 
 function sanitizeDeep(deep: Record<string, any>, accountability?: Accountability | null) {
+	const logger = useLogger();
+
 	const result: Record<string, any> = {};
 
 	if (typeof deep === 'string') {
 		try {
-			deep = JSON.parse(deep);
+			deep = parseJSON(deep);
 		} catch {
 			logger.warn('Invalid value passed for deep query parameter.');
 		}
@@ -189,19 +202,26 @@ function sanitizeDeep(deep: Record<string, any>, accountability?: Accountability
 	return result;
 
 	function parse(level: Record<string, any>, path: string[] = []) {
+		const subQuery: Record<string, any> = {};
 		const parsedLevel: Record<string, any> = {};
 
 		for (const [key, value] of Object.entries(level)) {
 			if (!key) break;
 
 			if (key.startsWith('_')) {
-				// Sanitize query only accepts non-underscore-prefixed query options
-				const parsedSubQuery = sanitizeQuery({ [key.substring(1)]: value }, accountability);
-				// ...however we want to keep them for the nested structure of deep, otherwise there's no
-				// way of knowing when to keep nesting and when to stop
-				parsedLevel[key] = Object.values(parsedSubQuery)[0];
-			} else {
+				// Collect all sub query parameters without the leading underscore
+				subQuery[key.substring(1)] = value;
+			} else if (isPlainObject(value)) {
 				parse(value, [...path, key]);
+			}
+		}
+
+		if (Object.keys(subQuery).length > 0) {
+			// Sanitize the entire sub query
+			const parsedSubQuery = sanitizeQuery(subQuery, accountability);
+
+			for (const [parsedKey, parsedValue] of Object.entries(parsedSubQuery)) {
+				parsedLevel[`_${parsedKey}`] = parsedValue;
 			}
 		}
 
@@ -212,12 +232,14 @@ function sanitizeDeep(deep: Record<string, any>, accountability?: Accountability
 }
 
 function sanitizeAlias(rawAlias: any) {
+	const logger = useLogger();
+
 	let alias: Record<string, string> = rawAlias;
 
 	if (typeof rawAlias === 'string') {
 		try {
-			alias = JSON.parse(rawAlias);
-		} catch (err) {
+			alias = parseJSON(rawAlias);
+		} catch {
 			logger.warn('Invalid value passed for alias query parameter.');
 		}
 	}

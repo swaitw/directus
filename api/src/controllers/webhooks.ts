@@ -1,11 +1,12 @@
+import { ErrorCode, createError } from '@directus/errors';
 import express from 'express';
-import { ForbiddenException } from '../exceptions';
-import { respond } from '../middleware/respond';
-import useCollection from '../middleware/use-collection';
-import { validateBatch } from '../middleware/validate-batch';
-import { MetaService, WebhooksService } from '../services';
-import { PrimaryKey } from '../types';
-import asyncHandler from '../utils/async-handler';
+import { respond } from '../middleware/respond.js';
+import useCollection from '../middleware/use-collection.js';
+import { validateBatch } from '../middleware/validate-batch.js';
+import { MetaService } from '../services/meta.js';
+import { WebhooksService } from '../services/webhooks.js';
+import asyncHandler from '../utils/async-handler.js';
+import { sanitizeQuery } from '../utils/sanitize-query.js';
 
 const router = express.Router();
 
@@ -13,41 +14,11 @@ router.use(useCollection('directus_webhooks'));
 
 router.post(
 	'/',
-	asyncHandler(async (req, res, next) => {
-		const service = new WebhooksService({
-			accountability: req.accountability,
-			schema: req.schema,
-		});
-
-		const savedKeys: PrimaryKey[] = [];
-
-		if (Array.isArray(req.body)) {
-			const keys = await service.createMany(req.body);
-			savedKeys.push(...keys);
-		} else {
-			const key = await service.createOne(req.body);
-			savedKeys.push(key);
-		}
-
-		try {
-			if (Array.isArray(req.body)) {
-				const items = await service.readMany(savedKeys, req.sanitizedQuery);
-				res.locals.payload = { data: items };
-			} else {
-				const item = await service.readOne(savedKeys[0], req.sanitizedQuery);
-				res.locals.payload = { data: item };
-			}
-		} catch (error: any) {
-			if (error instanceof ForbiddenException) {
-				return next();
-			}
-
-			throw error;
-		}
-
-		return next();
+	asyncHandler(async (_req, _res, _next) => {
+		// Disallow creation of new Webhooks as part of the deprecation, see https://github.com/directus/directus/issues/15553
+		throw new (createError(ErrorCode.MethodNotAllowed, 'Webhooks are deprecated, use Flows instead', 405))();
 	}),
-	respond
+	respond,
 );
 
 const readHandler = asyncHandler(async (req, res, next) => {
@@ -55,6 +26,7 @@ const readHandler = asyncHandler(async (req, res, next) => {
 		accountability: req.accountability,
 		schema: req.schema,
 	});
+
 	const metaService = new MetaService({
 		accountability: req.accountability,
 		schema: req.schema,
@@ -63,7 +35,7 @@ const readHandler = asyncHandler(async (req, res, next) => {
 	const records = await service.readByQuery(req.sanitizedQuery);
 	const meta = await metaService.getMetaForQuery(req.collection, req.sanitizedQuery);
 
-	res.locals.payload = { data: records || null, meta };
+	res.locals['payload'] = { data: records || null, meta };
 	return next();
 });
 
@@ -78,76 +50,36 @@ router.get(
 			schema: req.schema,
 		});
 
-		const record = await service.readOne(req.params.pk, req.sanitizedQuery);
+		const record = await service.readOne(req.params['pk']!, req.sanitizedQuery);
 
-		res.locals.payload = { data: record || null };
+		res.locals['payload'] = { data: record || null };
 		return next();
 	}),
-	respond
+	respond,
 );
 
 router.patch(
 	'/',
 	validateBatch('update'),
-	asyncHandler(async (req, res, next) => {
-		const service = new WebhooksService({
-			accountability: req.accountability,
-			schema: req.schema,
-		});
-
-		let keys: PrimaryKey[] = [];
-
-		if (req.body.keys) {
-			keys = await service.updateMany(req.body.keys, req.body.data);
-		} else {
-			keys = await service.updateByQuery(req.body.query, req.body.data);
-		}
-
-		try {
-			const result = await service.readMany(keys, req.sanitizedQuery);
-			res.locals.payload = { data: result };
-		} catch (error: any) {
-			if (error instanceof ForbiddenException) {
-				return next();
-			}
-
-			throw error;
-		}
-
-		return next();
+	asyncHandler(async (_req, _res, _next) => {
+		// Disallow patching of Webhooks as part of the deprecation, see https://github.com/directus/directus/issues/15553
+		throw new (createError(ErrorCode.MethodNotAllowed, 'Webhooks are deprecated, use Flows instead', 405))();
 	}),
-	respond
+	respond,
 );
 
 router.patch(
 	'/:pk',
-	asyncHandler(async (req, res, next) => {
-		const service = new WebhooksService({
-			accountability: req.accountability,
-			schema: req.schema,
-		});
-
-		const primaryKey = await service.updateOne(req.params.pk, req.body);
-
-		try {
-			const item = await service.readOne(primaryKey, req.sanitizedQuery);
-			res.locals.payload = { data: item || null };
-		} catch (error: any) {
-			if (error instanceof ForbiddenException) {
-				return next();
-			}
-
-			throw error;
-		}
-
-		return next();
+	asyncHandler(async (_req, _res, _next) => {
+		// Disallow patching of Webhooks as part of the deprecation, see https://github.com/directus/directus/issues/15553
+		throw new (createError(ErrorCode.MethodNotAllowed, 'Webhooks are deprecated, use Flows instead', 405))();
 	}),
-	respond
+	respond,
 );
 
 router.delete(
 	'/',
-	asyncHandler(async (req, res, next) => {
+	asyncHandler(async (req, _res, next) => {
 		const service = new WebhooksService({
 			accountability: req.accountability,
 			schema: req.schema,
@@ -158,27 +90,28 @@ router.delete(
 		} else if (req.body.keys) {
 			await service.deleteMany(req.body.keys);
 		} else {
-			await service.deleteByQuery(req.body.query);
+			const sanitizedQuery = sanitizeQuery(req.body.query, req.accountability);
+			await service.deleteByQuery(sanitizedQuery);
 		}
 
 		return next();
 	}),
-	respond
+	respond,
 );
 
 router.delete(
 	'/:pk',
-	asyncHandler(async (req, res, next) => {
+	asyncHandler(async (req, _res, next) => {
 		const service = new WebhooksService({
 			accountability: req.accountability,
 			schema: req.schema,
 		});
 
-		await service.deleteOne(req.params.pk);
+		await service.deleteOne(req.params['pk']!);
 
 		return next();
 	}),
-	respond
+	respond,
 );
 
 export default router;

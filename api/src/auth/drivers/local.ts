@@ -1,115 +1,118 @@
+import { useEnv } from '@directus/env';
+import { InvalidCredentialsError, InvalidPayloadError } from '@directus/errors';
+import type { Accountability } from '@directus/types';
 import argon2 from 'argon2';
-import { AuthDriver } from '../auth';
-import { User } from '../../types';
-import { InvalidCredentialsException, InvalidPayloadException } from '../../exceptions';
-import { AuthenticationService } from '../../services';
 import { Router } from 'express';
 import Joi from 'joi';
-import asyncHandler from '../../utils/async-handler';
-import env from '../../env';
-import ms from 'ms';
-import { respond } from '../../middleware/respond';
+import { performance } from 'perf_hooks';
+import { REFRESH_COOKIE_OPTIONS, SESSION_COOKIE_OPTIONS } from '../../constants.js';
+import { respond } from '../../middleware/respond.js';
+import { createDefaultAccountability } from '../../permissions/utils/create-default-accountability.js';
+import { AuthenticationService } from '../../services/authentication.js';
+import type { AuthenticationMode, User } from '../../types/index.js';
+import asyncHandler from '../../utils/async-handler.js';
+import { getIPFromReq } from '../../utils/get-ip-from-req.js';
+import { stall } from '../../utils/stall.js';
+import { AuthDriver } from '../auth.js';
 
 export class LocalAuthDriver extends AuthDriver {
-	/**
-	 * Get user id by email
-	 */
 	async getUserID(payload: Record<string, any>): Promise<string> {
-		if (!payload.email) {
-			throw new InvalidCredentialsException();
+		if (!payload['email']) {
+			throw new InvalidCredentialsError();
 		}
 
 		const user = await this.knex
 			.select('id')
 			.from('directus_users')
-			.whereRaw('LOWER(??) = ?', ['email', payload.email.toLowerCase()])
+			.whereRaw('LOWER(??) = ?', ['email', payload['email'].toLowerCase()])
 			.first();
 
 		if (!user) {
-			throw new InvalidCredentialsException();
+			throw new InvalidCredentialsError();
 		}
 
 		return user.id;
 	}
 
-	/**
-	 * Verify user password
-	 */
 	async verify(user: User, password?: string): Promise<void> {
 		if (!user.password || !(await argon2.verify(user.password, password as string))) {
-			throw new InvalidCredentialsException();
+			throw new InvalidCredentialsError();
 		}
 	}
 
-	async login(user: User, payload: Record<string, any>): Promise<null> {
-		if (payload.password) {
-			await this.verify(user, payload.password);
-		}
-		return null;
+	override async login(user: User, payload: Record<string, any>): Promise<void> {
+		await this.verify(user, payload['password']);
 	}
 }
 
 export function createLocalAuthRouter(provider: string): Router {
+	const env = useEnv();
+
 	const router = Router();
 
-	const loginSchema = Joi.object({
+	const userLoginSchema = Joi.object({
 		email: Joi.string().email().required(),
 		password: Joi.string().required(),
-		mode: Joi.string().valid('cookie', 'json'),
+		mode: Joi.string().valid('cookie', 'json', 'session'),
 		otp: Joi.string(),
 	}).unknown();
 
 	router.post(
 		'/',
 		asyncHandler(async (req, res, next) => {
-			const accountability = {
-				ip: req.ip,
-				userAgent: req.get('user-agent'),
-				role: null,
-			};
+			const STALL_TIME = env['LOGIN_STALL_TIME'] as number;
+			const timeStart = performance.now();
+
+			const accountability: Accountability = createDefaultAccountability({
+				ip: getIPFromReq(req),
+			});
+
+			const userAgent = req.get('user-agent')?.substring(0, 1024);
+			if (userAgent) accountability.userAgent = userAgent;
+
+			const origin = req.get('origin');
+			if (origin) accountability.origin = origin;
 
 			const authenticationService = new AuthenticationService({
 				accountability: accountability,
 				schema: req.schema,
 			});
 
-			const { error } = loginSchema.validate(req.body);
+			const { error } = userLoginSchema.validate(req.body);
 
 			if (error) {
-				throw new InvalidPayloadException(error.message);
+				await stall(STALL_TIME, timeStart);
+				throw new InvalidPayloadError({ reason: error.message });
 			}
 
-			const mode = req.body.mode || 'json';
+			const mode: AuthenticationMode = req.body.mode ?? 'json';
 
-			const { accessToken, refreshToken, expires } = await authenticationService.login(
-				provider,
-				req.body,
-				req.body?.otp
-			);
+			const { accessToken, refreshToken, expires } = await authenticationService.login(provider, req.body, {
+				session: mode === 'session',
+				otp: req.body?.otp,
+			});
 
-			const payload = {
-				data: { access_token: accessToken, expires },
-			} as Record<string, Record<string, any>>;
+			const payload = { expires } as { expires: number; access_token?: string; refresh_token?: string };
 
 			if (mode === 'json') {
-				payload.data.refresh_token = refreshToken;
+				payload.refresh_token = refreshToken;
+				payload.access_token = accessToken;
 			}
 
 			if (mode === 'cookie') {
-				res.cookie(env.REFRESH_TOKEN_COOKIE_NAME, refreshToken, {
-					httpOnly: true,
-					domain: env.REFRESH_TOKEN_COOKIE_DOMAIN,
-					maxAge: ms(env.REFRESH_TOKEN_TTL as string),
-					secure: env.REFRESH_TOKEN_COOKIE_SECURE ?? false,
-					sameSite: (env.REFRESH_TOKEN_COOKIE_SAME_SITE as 'lax' | 'strict' | 'none') || 'strict',
-				});
+				res.cookie(env['REFRESH_TOKEN_COOKIE_NAME'] as string, refreshToken, REFRESH_COOKIE_OPTIONS);
+				payload.access_token = accessToken;
 			}
 
-			res.locals.payload = payload;
+			if (mode === 'session') {
+				res.cookie(env['SESSION_COOKIE_NAME'] as string, accessToken, SESSION_COOKIE_OPTIONS);
+			}
+
+			res.locals['payload'] = { data: payload };
 
 			return next();
 		}),
-		respond
+		respond,
 	);
 
 	return router;

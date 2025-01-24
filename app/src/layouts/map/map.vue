@@ -1,3 +1,62 @@
+<script setup lang="ts">
+import { usePageSize } from '@/composables/use-page-size';
+import { useSync } from '@directus/composables';
+import { GeometryOptions } from '@directus/types';
+import { useI18n } from 'vue-i18n';
+import MapComponent from './components/map.vue';
+
+defineOptions({ inheritAttrs: false });
+
+const props = withDefaults(
+	defineProps<{
+		collection: string;
+		geojson: any;
+		directusSource: any;
+		directusLayers: any[];
+		handleClick: (event: { id: string | number; replace: boolean }) => void;
+		handleSelect: (event: { ids: Array<string | number>; replace: boolean }) => void;
+		resetPresetAndRefresh: () => Promise<void>;
+		fitDataBounds: () => void;
+		updateItemPopup: () => void;
+		geojsonLoading: boolean;
+		loading: boolean;
+		totalCount: number | null;
+		totalPages: number;
+		page: number;
+		toPage: (newPage: number) => void;
+		limit: number;
+		selection?: (string | number)[];
+		error?: any;
+		geojsonError?: string;
+		geometryOptions?: GeometryOptions;
+		featureId?: string;
+		geojsonBounds?: any;
+		cameraOptions?: any;
+		autoLocationFilter?: boolean;
+		template?: string;
+		itemPopup?: { item?: any; position?: { x: number; y: number } };
+	}>(),
+	{
+		selection: () => [],
+	},
+);
+
+const emit = defineEmits(['update:cameraOptions', 'update:limit']);
+
+const { t, n } = useI18n();
+
+const cameraOptionsWritable = useSync(props, 'cameraOptions', emit);
+const limitWritable = useSync(props, 'limit', emit);
+
+const { sizes: pageSizes, selected: selectedSize } = usePageSize<{ text: string; value: number }>(
+	[100, 1000, 10000, 100000],
+	(value) => ({ text: n(value), value }),
+	props.limit,
+);
+
+limitWritable.value = selectedSize;
+</script>
+
 <template>
 	<div class="layout-map">
 		<map-component
@@ -14,28 +73,22 @@
 			@featureclick="handleClick"
 			@featureselect="handleSelect"
 			@moveend="cameraOptionsWritable = $event"
-			@fitdata="clearLocationFilter"
+			@fitdata="fitDataBounds"
+			@updateitempopup="updateItemPopup"
 		/>
 
-		<v-button
-			v-if="isGeometryFieldNative && !autoLocationFilter && locationFilterOutdatedWritable"
-			small
-			class="location-filter"
-			@click="updateLocationFilter"
-		>
-			{{ t('layouts.map.search_this_area') }}
-		</v-button>
+		<transition name="fade">
+			<div
+				v-if="itemPopup!.item"
+				class="popup"
+				:style="{ top: itemPopup!.position!.y + 'px', left: itemPopup!.position!.x + 'px' }"
+			>
+				<render-template :template="template" :item="itemPopup!.item" :collection="collection" />
+			</div>
+		</transition>
 
 		<transition name="fade">
-			<v-info v-if="error" type="danger" :title="t('unexpected_error')" icon="error" center>
-				{{ t('unexpected_error_copy') }}
-				<template #append>
-					<v-error :error="error" />
-					<v-button small class="reset-preset" @click="resetPresetAndRefresh">
-						{{ t('reset_page_preferences') }}
-					</v-button>
-				</template>
-			</v-info>
+			<slot v-if="error" name="error" :error="error" :reset="resetPresetAndRefresh" />
 			<v-info
 				v-else-if="geojsonError"
 				type="warning"
@@ -46,33 +99,12 @@
 				{{ geojsonError }}
 			</v-info>
 			<v-progress-circular v-else-if="loading || geojsonLoading" indeterminate x-large class="center" />
-			<v-info
-				v-else-if="itemCount === 0 && (searchQuery || activeFilterCount > 0 || !locationFilterOutdated)"
-				icon="search"
-				center
-				:title="t('no_results_here')"
-			>
-				<template #append>
-					<v-card-actions>
-						<v-button
-							:disabled="!searchQuery && !filters.filter((f) => f.key !== 'location-filter').length"
-							@click="clearDataFilters"
-						>
-							{{ t('clear_data_filters') }}
-						</v-button>
-						<v-button :disabled="locationFilterOutdated" @click="clearLocationFilter">
-							{{ t('layouts.map.clear_location_filter') }}
-						</v-button>
-					</v-card-actions>
-				</template>
-			</v-info>
 		</transition>
 
-		<template v-if="loading || itemCount > 0">
+		<template v-if="loading || (totalCount ?? 0) > 0">
 			<div class="footer">
-				<div class="pagination">
+				<div v-if="totalPages > 1" class="pagination">
 					<v-pagination
-						v-if="totalPages > 1"
 						:length="totalPages"
 						:total-visible="7"
 						show-first-last
@@ -82,263 +114,18 @@
 				</div>
 				<div class="mapboxgl-ctrl-dropdown">
 					<span>{{ t('limit') }}</span>
-					<v-select
-						:model-value="limit"
-						:items="[
-							{
-								text: n(100),
-								value: 100,
-							},
-							{
-								text: n(1000),
-								value: 1000,
-							},
-							{
-								text: n(10000),
-								value: 10000,
-							},
-							{
-								text: n(100000),
-								value: 100000,
-							},
-						]"
-						inline
-						@update:model-value="limitWritable = +$event"
-					/>
+					<v-select :model-value="limit" :items="pageSizes" inline @update:model-value="limitWritable = +$event" />
 				</div>
 			</div>
 		</template>
 	</div>
 </template>
 
-<script lang="ts">
-import { useI18n } from 'vue-i18n';
-import { defineComponent, PropType } from 'vue';
-
-import MapComponent from './components/map.vue';
-import { useSync } from '@directus/shared/composables';
-import { GeometryOptions, Item } from '@directus/shared/types';
-import { Filter } from '@directus/shared/types';
-
-export default defineComponent({
-	components: { MapComponent },
-	inheritAttrs: false,
-	props: {
-		selection: {
-			type: Array as PropType<Item[]>,
-			default: () => [],
-		},
-		searchQuery: {
-			type: String as PropType<string | null>,
-			default: null,
-		},
-		loading: {
-			type: Boolean,
-			required: true,
-		},
-		error: {
-			type: Object as PropType<any>,
-			default: null,
-		},
-		geojsonError: {
-			type: String,
-			default: null,
-		},
-		geometryOptions: {
-			type: Object as PropType<GeometryOptions>,
-			default: undefined,
-		},
-		geojson: {
-			type: Object as PropType<any>,
-			required: true,
-		},
-		featureId: {
-			type: String,
-			default: null,
-		},
-		geojsonBounds: {
-			type: Object as PropType<any>,
-			default: undefined,
-		},
-		directusSource: {
-			type: Object as PropType<any>,
-			required: true,
-		},
-		directusLayers: {
-			type: Array as PropType<any[]>,
-			required: true,
-		},
-		handleClick: {
-			type: Function as PropType<(event: { id: string | number; replace: boolean }) => void>,
-			required: true,
-		},
-		handleSelect: {
-			type: Function as PropType<(event: { ids: Array<string | number>; replace: boolean }) => void>,
-			required: true,
-		},
-		cameraOptions: {
-			type: Object as PropType<any>,
-			default: undefined,
-		},
-		resetPresetAndRefresh: {
-			type: Function as PropType<() => Promise<void>>,
-			required: true,
-		},
-		geojsonLoading: {
-			type: Boolean,
-			required: true,
-		},
-		itemCount: {
-			type: Number,
-			default: null,
-		},
-		activeFilterCount: {
-			type: Number,
-			required: true,
-		},
-		totalPages: {
-			type: Number,
-			required: true,
-		},
-		page: {
-			type: Number,
-			required: true,
-		},
-		toPage: {
-			type: Function as PropType<(newPage: number) => void>,
-			required: true,
-		},
-		limit: {
-			type: Number,
-			required: true,
-		},
-		filters: {
-			type: Array as PropType<Filter[]>,
-			required: true,
-		},
-		autoLocationFilter: {
-			type: Boolean,
-			default: undefined,
-		},
-		locationFilterOutdated: {
-			type: Boolean,
-			required: true,
-		},
-		updateLocationFilter: {
-			type: Function as PropType<() => void>,
-			required: true,
-		},
-		clearDataFilters: {
-			type: Function as PropType<() => void>,
-			required: true,
-		},
-		clearLocationFilter: {
-			type: Function as PropType<() => void>,
-			required: true,
-		},
-		isGeometryFieldNative: {
-			type: Boolean,
-			required: true,
-		},
-	},
-	emits: ['update:cameraOptions', 'update:limit'],
-	setup(props, { emit }) {
-		const { t, n } = useI18n();
-
-		const cameraOptionsWritable = useSync(props, 'cameraOptions', emit);
-		const limitWritable = useSync(props, 'limit', emit);
-		const locationFilterOutdatedWritable = useSync(props, 'locationFilterOutdated', emit);
-
-		return { t, n, cameraOptionsWritable, limitWritable, locationFilterOutdatedWritable };
-	},
-});
-</script>
-
-<style lang="scss">
-.mapboxgl-ctrl-dropdown {
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	height: 36px;
-	padding: 10px;
-	color: var(--foreground-subdued);
-	background-color: var(--background-subdued);
-	border: var(--border-width) solid var(--background-subdued);
-	border-radius: var(--border-radius);
-
-	span {
-		width: auto;
-		margin-right: 4px;
-	}
-
-	.v-select {
-		color: var(--foreground-normal);
-	}
-}
-</style>
-
-<style lang="scss">
-.layout-map .mapboxgl-map .mapboxgl-canvas-container {
-	transition: opacity 0.2s;
-}
-
-.layout-map .mapboxgl-map.loading .mapboxgl-canvas-container {
-	opacity: 0.9;
-}
-
-.layout-map .mapboxgl-map.error .mapboxgl-canvas-container {
-	opacity: 0.4;
-}
-</style>
-
 <style lang="scss" scoped>
-.layout-map {
-	position: relative;
-	width: 100%;
-	height: calc(100% - 65px);
-}
-
-.center {
-	position: absolute;
-	top: 50%;
-	left: 50%;
-	-webkit-transform: translate(-50%, -50%);
-	transform: translate(-50%, -50%);
-}
-
-.location-filter {
-	position: absolute;
-	top: 10px;
-	left: 50%;
-	transform: translate(-50%, 0%);
-}
-
-.v-progress-circular {
-	--v-progress-circular-background-color: var(--primary-25);
-	--v-progress-circular-color: var(--primary-75);
-}
-
-.reset-preset {
-	margin-top: 24px;
-}
-
-.delete-action {
-	--v-button-background-color: var(--danger-10);
-	--v-button-color: var(--danger);
-	--v-button-background-color-hover: var(--danger-25);
-	--v-button-color-hover: var(--danger);
-}
-
-.custom-layers {
-	padding: var(--content-padding);
-	padding-top: 0;
-}
-
 .v-info {
 	padding: 40px;
-	background-color: var(--background-page);
-	border-radius: var(--border-radius);
-	box-shadow: var(--card-shadow);
+	background-color: var(--theme--background);
+	border-radius: var(--theme--border-radius);
 	pointer-events: none;
 }
 
@@ -346,15 +133,87 @@ export default defineComponent({
 	pointer-events: initial;
 }
 
+.layout-map .mapboxgl-map :deep(.mapboxgl-canvas-container) {
+	transition: opacity 0.2s;
+}
+
+.layout-map .mapboxgl-map.loading :deep(.mapboxgl-canvas-container) {
+	opacity: 0.9;
+}
+
+.layout-map .mapboxgl-map.error :deep(.mapboxgl-canvas-container) {
+	opacity: 0.4;
+}
+
+.layout-map {
+	position: relative;
+	width: 100%;
+	height: calc(100% - 60px);
+}
+
+.center {
+	position: absolute;
+	top: 50%;
+	left: 50%;
+	transform: translate(-50%, -50%);
+}
+
+.popup {
+	position: fixed;
+	z-index: 1;
+	max-width: 80%;
+	padding: 6px 10px;
+	color: var(--theme--foreground-accent);
+	font-weight: 500;
+	font-size: 14px;
+	font-family: var(--theme--fonts--sans--font-family);
+	background: var(--theme--popover--menu--background);
+	border-radius: var(--theme--popover--menu--border-radius);
+	box-shadow: var(--theme--popover--menu--box-shadow);
+	transform: translate(-50%, -140%);
+	pointer-events: none;
+}
+
+.render-template {
+	padding-right: 0;
+}
+
+.mapboxgl-ctrl-dropdown {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	height: 36px;
+	padding: 10px;
+	color: var(--theme--foreground-subdued);
+	background: var(--theme--popover--menu--background);
+	border-radius: var(--theme--popover--menu--border-radius);
+	box-shadow: var(--theme--popover--menu--box-shadow);
+	border: var(--theme--border-width) solid var(--theme--background);
+
+	span {
+		width: auto;
+		margin-right: 4px;
+	}
+
+	.v-select {
+		color: var(--theme--foreground);
+	}
+}
+
+.v-progress-circular {
+	--v-progress-circular-background-color: var(--theme--primary-background);
+	--v-progress-circular-color: var(--theme--primary);
+}
+
 .footer {
 	position: absolute;
-	right: 10px;
-	bottom: 10px;
-	left: 10px;
+	right: 0;
+	bottom: 0;
 	display: flex;
 	align-items: center;
 	justify-content: space-between;
 	box-sizing: border-box;
+	padding: 10px;
 	overflow: hidden;
 	background-color: transparent !important;
 
@@ -362,10 +221,21 @@ export default defineComponent({
 		--v-button-height: 28px;
 
 		display: inline-block;
+		margin-right: 10px;
 
 		button {
-			box-shadow: 0 0 2px 1px rgba(0, 0, 0, 0.2);
+			box-shadow: 0 0 3px 1px rgba(0, 0, 0, 0.1);
 		}
 	}
+}
+
+.fade-enter-active,
+.fade-leave-active {
+	transition: opacity var(--medium) var(--transition);
+}
+
+.fade-enter-from,
+.fade-leave-to {
+	opacity: 0;
 }
 </style>

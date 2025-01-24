@@ -1,11 +1,24 @@
 export {
-	defineInterface,
+	useApi,
+	useSdk,
+	useCollection,
+	useExtensions,
+	useFilterFields,
+	useItems,
+	useLayout,
+	useStores,
+	useSync,
+} from '@directus/composables';
+export {
 	defineDisplay,
+	defineEndpoint,
+	defineHook,
+	defineInterface,
 	defineLayout,
 	defineModule,
-	defineHook,
-	defineEndpoint,
-	getFieldsFromTemplate,
-	getRelationType,
-} from '@directus/shared/utils';
-export { useStores, useApi, useSync, useCollection, useItems, useFilterFields } from '@directus/shared/composables';
+	defineOperationApi,
+	defineOperationApp,
+	definePanel,
+} from '@directus/extensions';
+export { defineTheme } from '@directus/themes';
+export { getFieldsFromTemplate, getRelationType } from '@directus/utils';

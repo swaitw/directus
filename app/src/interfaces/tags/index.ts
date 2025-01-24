@@ -1,5 +1,6 @@
-import { defineInterface } from '@directus/shared/utils';
+import { defineInterface } from '@directus/extensions';
 import InterfaceTags from './tags.vue';
+import PreviewSVG from './preview.svg?raw';
 
 export default defineInterface({
 	id: 'tags',
@@ -8,6 +9,7 @@ export default defineInterface({
 	icon: 'local_offer',
 	component: InterfaceTags,
 	types: ['json', 'csv'],
+	group: 'standard',
 	options: [
 		{
 			field: 'presets',
@@ -24,7 +26,7 @@ export default defineInterface({
 			type: 'string',
 			meta: {
 				width: 'full',
-				interface: 'input',
+				interface: 'system-input-translated-string',
 				options: {
 					placeholder: '$t:enter_a_placeholder',
 				},
@@ -57,7 +59,7 @@ export default defineInterface({
 				},
 			},
 			schema: {
-				default_value: false,
+				default_value: true,
 			},
 		},
 		{
@@ -114,4 +116,5 @@ export default defineInterface({
 		},
 	],
 	recommendedDisplays: ['labels'],
+	preview: PreviewSVG,
 });

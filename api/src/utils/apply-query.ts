@@ -1,15 +1,41 @@
-import { Knex } from 'knex';
-import { clone, get, isPlainObject, set } from 'lodash';
-import { customAlphabet } from 'nanoid';
-import validate from 'uuid-validate';
-import { InvalidQueryException } from '../exceptions';
-import { Aggregate, Filter, Query, Relation, SchemaOverview } from '../types';
-import { applyFunctionToColumnName } from './apply-function-to-column-name';
-import { getColumn } from './get-column';
-import { getRelationType } from './get-relation-type';
-import { getGeometryHelper } from '../database/helpers/geometry';
+import { NUMERIC_TYPES } from '@directus/constants';
+import { InvalidQueryError } from '@directus/errors';
+import type {
+	Aggregate,
+	ClientFilterOperator,
+	FieldFunction,
+	FieldOverview,
+	Filter,
+	NumericType,
+	Permission,
+	Query,
+	Relation,
+	SchemaOverview,
+	Type,
+} from '@directus/types';
+import { getFilterOperatorsForType, getFunctionsForType, getOutputTypeForFunction, isIn } from '@directus/utils';
+import type { Knex } from 'knex';
+import { clone, isPlainObject } from 'lodash-es';
+import { customAlphabet } from 'nanoid/non-secure';
+import { getHelpers } from '../database/helpers/index.js';
+import { applyCaseWhen } from '../database/run-ast/utils/apply-case-when.js';
+import { getCases } from '../permissions/modules/process-ast/lib/get-cases.js';
+import type { AliasMap } from './get-column-path.js';
+import { getColumnPath } from './get-column-path.js';
+import { getColumn } from './get-column.js';
+import { getRelationInfo } from './get-relation-info.js';
+import { isValidUuid } from './is-valid-uuid.js';
+import { parseFilterKey } from './parse-filter-key.js';
+import { parseNumericString } from './parse-numeric-string.js';
 
-const generateAlias = customAlphabet('abcdefghijklmnopqrstuvwxyz', 5);
+export const generateAlias = customAlphabet('abcdefghijklmnopqrstuvwxyz', 5);
+
+type ApplyQueryOptions = {
+	aliasMap?: AliasMap;
+	isInnerQuery?: boolean;
+	hasMultiRelationalSort?: boolean | undefined;
+	groupWhenCases?: number[][] | undefined;
+};
 
 /**
  * Apply the Query to a given Knex query builder instance
@@ -20,44 +46,102 @@ export default function applyQuery(
 	dbQuery: Knex.QueryBuilder,
 	query: Query,
 	schema: SchemaOverview,
-	subQuery = false
-): void {
-	if (query.sort) {
-		dbQuery.orderBy(
-			query.sort.map((sort) => ({
-				...sort,
-				column: getColumn(knex, collection, sort.column, false) as any,
-			}))
-		);
-	}
+	cases: Filter[],
+	permissions: Permission[],
+	options?: ApplyQueryOptions,
+) {
+	const aliasMap: AliasMap = options?.aliasMap ?? Object.create(null);
+	let hasJoins = false;
+	let hasMultiRelationalFilter = false;
 
-	if (typeof query.limit === 'number') {
-		dbQuery.limit(query.limit);
-	}
+	applyLimit(knex, dbQuery, query.limit);
 
 	if (query.offset) {
-		dbQuery.offset(query.offset);
+		applyOffset(knex, dbQuery, query.offset);
 	}
 
-	if (query.page && query.limit) {
-		dbQuery.offset(query.limit * (query.page - 1));
+	if (query.page && query.limit && query.limit !== -1) {
+		applyOffset(knex, dbQuery, query.limit * (query.page - 1));
 	}
 
-	if (query.filter) {
-		applyFilter(knex, schema, dbQuery, query.filter, collection, subQuery);
+	if (query.sort && !options?.isInnerQuery && !options?.hasMultiRelationalSort) {
+		const sortResult = applySort(knex, schema, dbQuery, query, collection, aliasMap);
+
+		if (!hasJoins) {
+			hasJoins = sortResult.hasJoins;
+		}
 	}
 
 	if (query.search) {
-		applySearch(schema, dbQuery, query.search, collection);
+		applySearch(knex, schema, dbQuery, query.search, collection);
+	}
+
+	// `cases` are the permissions cases that are required for the current data set. We're
+	// dynamically adding those into the filters that the user provided to enforce the permission
+	// rules. You should be able to read an item if one or more of the cases matches. The actual case
+	// is reused in the column selection case/when to dynamically return or nullify the field values
+	// you're actually allowed to read
+
+	const filter: Filter | null = joinFilterWithCases(query.filter, cases);
+
+	if (filter) {
+		const filterResult = applyFilter(knex, schema, dbQuery, filter, collection, aliasMap, cases, permissions);
+
+		if (!hasJoins) {
+			hasJoins = filterResult.hasJoins;
+		}
+
+		hasMultiRelationalFilter = filterResult.hasMultiRelationalFilter;
 	}
 
 	if (query.group) {
-		dbQuery.groupBy(query.group.map(applyFunctionToColumnName));
+		const rawColumns = query.group.map((column) => getColumn(knex, collection, column, false, schema));
+		let columns;
+
+		if (options?.groupWhenCases) {
+			columns = rawColumns.map((column, index) =>
+				applyCaseWhen(
+					{
+						columnCases: options.groupWhenCases![index]!.map((caseIndex) => cases[caseIndex]!),
+						column,
+						aliasMap,
+						cases,
+						table: collection,
+						permissions,
+					},
+					{
+						knex,
+						schema,
+					},
+				),
+			);
+
+			if (query.sort && query.sort.length === 1 && query.sort[0] === query.group[0]) {
+				// Special case, where the sort query is injected by the group by operation
+				dbQuery.clear('order');
+
+				let order = 'asc';
+
+				if (query.sort[0]!.startsWith('-')) {
+					order = 'desc';
+				}
+
+				// @ts-expect-error (orderBy does not accept Knex.Raw for some reason, even though it is handled correctly)
+				// https://github.com/knex/knex/issues/5711
+				dbQuery.orderBy([{ column: columns[0]!, order }]);
+			}
+		} else {
+			columns = rawColumns;
+		}
+
+		dbQuery.groupBy(columns);
 	}
 
 	if (query.aggregate) {
-		applyAggregate(dbQuery, query.aggregate);
+		applyAggregate(schema, dbQuery, query.aggregate, collection, hasJoins);
 	}
+
+	return { query: dbQuery, hasJoins, hasMultiRelationalFilter };
 }
 
 /**
@@ -99,28 +183,305 @@ export default function applyQuery(
  * ```
  */
 
+type AddJoinProps = {
+	path: string[];
+	collection: string;
+	aliasMap: AliasMap;
+	relations: Relation[];
+	rootQuery: Knex.QueryBuilder;
+	schema: SchemaOverview;
+	knex: Knex;
+};
+
+function addJoin({ path, collection, aliasMap, rootQuery, schema, relations, knex }: AddJoinProps) {
+	let hasMultiRelational = false;
+	let isJoinAdded = false;
+
+	path = clone(path);
+	followRelation(path);
+
+	return { hasMultiRelational, isJoinAdded };
+
+	function followRelation(pathParts: string[], parentCollection: string = collection, parentFields?: string) {
+		/**
+		 * For A2M fields, the path can contain an optional collection scope <field>:<scope>
+		 */
+		const pathRoot = pathParts[0]!.split(':')[0]!;
+
+		const { relation, relationType } = getRelationInfo(relations, parentCollection, pathRoot);
+
+		if (!relation) {
+			return;
+		}
+
+		const existingAlias = parentFields
+			? aliasMap[`${parentFields}.${pathParts[0]}`]?.alias
+			: aliasMap[pathParts[0]!]?.alias;
+
+		if (!existingAlias) {
+			const alias = generateAlias();
+			const aliasKey = parentFields ? `${parentFields}.${pathParts[0]}` : pathParts[0]!;
+			const aliasedParentCollection = aliasMap[parentFields ?? '']?.alias || parentCollection;
+
+			aliasMap[aliasKey] = { alias, collection: '' };
+
+			if (relationType === 'm2o') {
+				rootQuery.leftJoin(
+					{ [alias]: relation.related_collection! },
+					`${aliasedParentCollection}.${relation.field}`,
+					`${alias}.${schema.collections[relation.related_collection!]!.primary}`,
+				);
+
+				aliasMap[aliasKey]!.collection = relation.related_collection!;
+
+				isJoinAdded = true;
+			} else if (relationType === 'a2o') {
+				const pathScope = pathParts[0]!.split(':')[1];
+
+				if (!pathScope) {
+					throw new InvalidQueryError({
+						reason: `You have to provide a collection scope when sorting or filtering on a many-to-any item`,
+					});
+				}
+
+				rootQuery.leftJoin({ [alias]: pathScope }, (joinClause) => {
+					joinClause
+						.onVal(`${aliasedParentCollection}.${relation.meta!.one_collection_field!}`, '=', pathScope)
+						.andOn(
+							`${aliasedParentCollection}.${relation.field}`,
+							'=',
+							knex.raw(
+								getHelpers(knex).schema.castA2oPrimaryKey(),
+								`${alias}.${schema.collections[pathScope]!.primary}`,
+							),
+						);
+				});
+
+				aliasMap[aliasKey]!.collection = pathScope;
+
+				isJoinAdded = true;
+			} else if (relationType === 'o2a') {
+				rootQuery.leftJoin({ [alias]: relation.collection }, (joinClause) => {
+					joinClause
+						.onVal(`${alias}.${relation.meta!.one_collection_field!}`, '=', parentCollection)
+						.andOn(
+							`${alias}.${relation.field}`,
+							'=',
+							knex.raw(
+								getHelpers(knex).schema.castA2oPrimaryKey(),
+								`${aliasedParentCollection}.${schema.collections[parentCollection]!.primary}`,
+							),
+						);
+				});
+
+				aliasMap[aliasKey]!.collection = relation.collection;
+
+				hasMultiRelational = true;
+				isJoinAdded = true;
+			} else if (relationType === 'o2m') {
+				rootQuery.leftJoin(
+					{ [alias]: relation.collection },
+					`${aliasedParentCollection}.${schema.collections[relation.related_collection!]!.primary}`,
+					`${alias}.${relation.field}`,
+				);
+
+				aliasMap[aliasKey]!.collection = relation.collection;
+
+				hasMultiRelational = true;
+				isJoinAdded = true;
+			}
+		}
+
+		let parent: string;
+
+		if (relationType === 'm2o') {
+			parent = relation.related_collection!;
+		} else if (relationType === 'a2o') {
+			const pathScope = pathParts[0]!.split(':')[1];
+
+			if (!pathScope) {
+				throw new InvalidQueryError({
+					reason: `You have to provide a collection scope when sorting or filtering on a many-to-any item`,
+				});
+			}
+
+			parent = pathScope;
+		} else {
+			parent = relation.collection;
+		}
+
+		if (pathParts.length > 1) {
+			followRelation(pathParts.slice(1), parent, `${parentFields ? parentFields + '.' : ''}${pathParts[0]}`);
+		}
+	}
+}
+
+export type ColumnSortRecord = { order: 'asc' | 'desc'; column: string };
+
+export function applySort(
+	knex: Knex,
+	schema: SchemaOverview,
+	rootQuery: Knex.QueryBuilder,
+	query: Query,
+	collection: string,
+	aliasMap: AliasMap,
+	returnRecords = false,
+) {
+	const rootSort = query.sort!;
+	const aggregate = query?.aggregate;
+	const relations: Relation[] = schema.relations;
+	let hasJoins = false;
+	let hasMultiRelationalSort = false;
+
+	const sortRecords = rootSort.map((sortField) => {
+		const column: string[] = sortField.split('.');
+		let order: 'asc' | 'desc' = 'asc';
+
+		if (sortField.startsWith('-')) {
+			order = 'desc';
+		}
+
+		if (column[0]!.startsWith('-')) {
+			column[0] = column[0]!.substring(1);
+		}
+
+		// Is the column name one of the aggregate functions used in the query if there is any?
+		if (Object.keys(aggregate ?? {}).includes(column[0]!)) {
+			// If so, return the column name without the order prefix
+			const operation = column[0]!;
+
+			// Get the field for the aggregate function
+			const field = column[1]!;
+
+			// If the operation is countAll there is no field.
+			if (operation === 'countAll') {
+				return {
+					order,
+					column: 'countAll',
+				};
+			}
+
+			// If the operation is a root count there is no field.
+			if (operation === 'count' && (field === '*' || !field)) {
+				return {
+					order,
+					column: 'count',
+				};
+			}
+
+			// Return the column name with the operation and field name
+			return {
+				order,
+				column: returnRecords ? column[0] : `${operation}->${field}`,
+			};
+		}
+
+		if (column.length === 1) {
+			const pathRoot = column[0]!.split(':')[0]!;
+			const { relation, relationType } = getRelationInfo(relations, collection, pathRoot);
+
+			if (!relation || ['m2o', 'a2o'].includes(relationType ?? '')) {
+				return {
+					order,
+					column: returnRecords ? column[0] : (getColumn(knex, collection, column[0]!, false, schema) as any),
+				};
+			}
+		}
+
+		const { hasMultiRelational, isJoinAdded } = addJoin({
+			path: column,
+			collection,
+			aliasMap,
+			rootQuery,
+			schema,
+			relations,
+			knex,
+		});
+
+		const { columnPath } = getColumnPath({
+			path: column,
+			collection,
+			aliasMap,
+			relations,
+			schema,
+		});
+
+		const [alias, field] = columnPath.split('.');
+
+		if (!hasJoins) {
+			hasJoins = isJoinAdded;
+		}
+
+		if (!hasMultiRelationalSort) {
+			hasMultiRelationalSort = hasMultiRelational;
+		}
+
+		return {
+			order,
+			column: returnRecords ? columnPath : (getColumn(knex, alias!, field!, false, schema) as any),
+		};
+	});
+
+	if (returnRecords) return { sortRecords, hasJoins, hasMultiRelationalSort };
+
+	// Clears the order if any, eg: from MSSQL offset
+	rootQuery.clear('order');
+
+	rootQuery.orderBy(sortRecords);
+
+	return { hasJoins, hasMultiRelationalSort };
+}
+
+export function applyLimit(knex: Knex, rootQuery: Knex.QueryBuilder, limit: any) {
+	if (typeof limit === 'number') {
+		getHelpers(knex).schema.applyLimit(rootQuery, limit);
+	}
+}
+
+export function applyOffset(knex: Knex, rootQuery: Knex.QueryBuilder, offset: any) {
+	if (typeof offset === 'number') {
+		getHelpers(knex).schema.applyOffset(rootQuery, offset);
+	}
+}
+
 export function applyFilter(
 	knex: Knex,
 	schema: SchemaOverview,
 	rootQuery: Knex.QueryBuilder,
 	rootFilter: Filter,
 	collection: string,
-	subQuery = false
-): void {
+	aliasMap: AliasMap,
+	cases: Filter[],
+	permissions: Permission[],
+) {
+	const helpers = getHelpers(knex);
 	const relations: Relation[] = schema.relations;
-
-	const aliasMap: Record<string, string> = {};
+	let hasJoins = false;
+	let hasMultiRelationalFilter = false;
 
 	addJoins(rootQuery, rootFilter, collection);
 	addWhereClauses(knex, rootQuery, rootFilter, collection);
 
+	return { query: rootQuery, hasJoins, hasMultiRelationalFilter };
+
 	function addJoins(dbQuery: Knex.QueryBuilder, filter: Filter, collection: string) {
-		for (const [key, value] of Object.entries(filter)) {
+		// eslint-disable-next-line prefer-const
+		for (let [key, value] of Object.entries(filter)) {
 			if (key === '_or' || key === '_and') {
 				// If the _or array contains an empty object (full permissions), we should short-circuit and ignore all other
 				// permission checks, as {} already matches full permissions.
-				if (key === '_or' && value.some((subFilter: Record<string, any>) => Object.keys(subFilter).length === 0))
-					continue;
+				if (key === '_or' && value.some((subFilter: Record<string, any>) => Object.keys(subFilter).length === 0)) {
+					// But only do so, if the value is not equal to `cases` (since then this is not permission related at all)
+					// or the length of value is 1, ie. only the empty filter.
+					// If the length is more than one it means that some items (and fields) might now be available, so
+					// the joins are required for the case/when construction.
+					if (value !== cases || value.length === 1) {
+						continue;
+					} else {
+						// Otherwise we can at least filter out all empty filters that would not add joins anyway
+						value = value.filter((subFilter: Record<string, any>) => Object.keys(subFilter).length > 0);
+					}
+				}
 
 				value.forEach((subFilter: Record<string, any>) => {
 					addJoins(dbQuery, subFilter, collection);
@@ -131,98 +492,26 @@ export function applyFilter(
 
 			const filterPath = getFilterPath(key, value);
 
-			if (filterPath.length > 1) {
-				addJoin(filterPath, collection);
-			}
-		}
-
-		function addJoin(path: string[], collection: string) {
-			path = clone(path);
-
-			followRelation(path);
-
-			function followRelation(pathParts: string[], parentCollection: string = collection, parentAlias?: string) {
-				/**
-				 * For M2A fields, the path can contain an optional collection scope <field>:<scope>
-				 */
-				const pathRoot = pathParts[0].split(':')[0];
-
-				const relation = relations.find((relation) => {
-					return (
-						(relation.collection === parentCollection && relation.field === pathRoot) ||
-						(relation.related_collection === parentCollection && relation.meta?.one_field === pathRoot)
-					);
+			if (
+				filterPath.length > 1 ||
+				(!(key.includes('(') && key.includes(')')) && schema.collections[collection]?.fields[key]?.type === 'alias')
+			) {
+				const { hasMultiRelational, isJoinAdded } = addJoin({
+					path: filterPath,
+					collection,
+					knex,
+					schema,
+					relations,
+					rootQuery,
+					aliasMap,
 				});
 
-				if (!relation) return;
-
-				const relationType = getRelationType({ relation, collection: parentCollection, field: pathRoot });
-
-				const alias = generateAlias();
-
-				set(aliasMap, parentAlias ? [parentAlias, ...pathParts] : pathParts, alias);
-
-				if (relationType === 'm2o') {
-					dbQuery.leftJoin(
-						{ [alias]: relation.related_collection! },
-						`${parentAlias || parentCollection}.${relation.field}`,
-						`${alias}.${schema.collections[relation.related_collection!].primary}`
-					);
+				if (!hasJoins) {
+					hasJoins = isJoinAdded;
 				}
 
-				if (relationType === 'm2a') {
-					const pathScope = pathParts[0].split(':')[1];
-
-					if (!pathScope) {
-						throw new InvalidQueryException(
-							`You have to provide a collection scope when filtering on a many-to-any item`
-						);
-					}
-
-					dbQuery.leftJoin({ [alias]: pathScope }, (joinClause) => {
-						joinClause
-							.on(
-								`${parentAlias || parentCollection}.${relation.field}`,
-								'=',
-								`${alias}.${schema.collections[pathScope].primary}`
-							)
-							.andOnVal(relation.meta!.one_collection_field!, '=', pathScope);
-					});
-				}
-
-				// Still join o2m relations when in subquery OR when the o2m relation is not at the root level
-				if (relationType === 'o2m' && (subQuery === true || parentAlias !== undefined)) {
-					dbQuery.leftJoin(
-						{ [alias]: relation.collection },
-						`${parentAlias || parentCollection}.${schema.collections[relation.related_collection!].primary}`,
-						`${alias}.${relation.field}`
-					);
-				}
-
-				if (relationType === 'm2o' || subQuery === true) {
-					let parent: string;
-
-					if (relationType === 'm2o') {
-						parent = relation.related_collection!;
-					} else if (relationType === 'm2a') {
-						const pathScope = pathParts[0].split(':')[1];
-
-						if (!pathScope) {
-							throw new InvalidQueryException(
-								`You have to provide a collection scope when filtering on a many-to-any item`
-							);
-						}
-
-						parent = pathScope;
-					} else {
-						parent = relation.collection;
-					}
-
-					pathParts.shift();
-
-					if (pathParts.length) {
-						followRelation(pathParts, parent, alias);
-					}
+				if (!hasMultiRelationalFilter) {
+					hasMultiRelationalFilter = hasMultiRelational;
 				}
 			}
 		}
@@ -233,7 +522,7 @@ export function applyFilter(
 		dbQuery: Knex.QueryBuilder,
 		filter: Filter,
 		collection: string,
-		logical: 'and' | 'or' = 'and'
+		logical: 'and' | 'or' = 'and',
 	) {
 		for (const [key, value] of Object.entries(filter)) {
 			if (key === '_or' || key === '_and') {
@@ -256,79 +545,198 @@ export function applyFilter(
 			const filterPath = getFilterPath(key, value);
 
 			/**
-			 * For M2A fields, the path can contain an optional collection scope <field>:<scope>
+			 * For A2M fields, the path can contain an optional collection scope <field>:<scope>
 			 */
-			const pathRoot = filterPath[0].split(':')[0];
+			const pathRoot = filterPath[0]!.split(':')[0]!;
 
-			const relation = relations.find((relation) => {
-				return (
-					(relation.collection === collection && relation.field === pathRoot) ||
-					(relation.related_collection === collection && relation.meta?.one_field === pathRoot)
-				);
-			});
+			const { relation, relationType } = getRelationInfo(relations, collection, pathRoot);
 
-			const { operator: filterOperator, value: filterValue } = getOperation(key, value);
+			const operation = getOperation(key, value);
 
-			const relationType = relation ? getRelationType({ relation, collection: collection, field: pathRoot }) : null;
+			if (!operation) continue;
 
-			if (relationType === 'm2o' || relationType === 'm2a' || relationType === null) {
-				if (filterPath.length > 1) {
-					const columnName = getWhereColumn(filterPath, collection);
-					if (!columnName) continue;
-					applyFilterToQuery(columnName, filterOperator, filterValue, logical);
-				} else {
-					applyFilterToQuery(`${collection}.${filterPath[0]}`, filterOperator, filterValue, logical);
+			const { operator: filterOperator, value: filterValue } = operation;
+
+			if (
+				filterPath.length > 1 ||
+				(!(key.includes('(') && key.includes(')')) && schema.collections[collection]?.fields[key]?.type === 'alias')
+			) {
+				if (!relation) continue;
+
+				if (relationType === 'o2m' || relationType === 'o2a') {
+					let pkField: Knex.Raw<any> | string = `${collection}.${
+						schema.collections[relation!.related_collection!]!.primary
+					}`;
+
+					if (relationType === 'o2a') {
+						pkField = knex.raw(getHelpers(knex).schema.castA2oPrimaryKey(), [pkField]);
+					}
+
+					const childKey = Object.keys(value)?.[0];
+
+					if (childKey === '_none' || childKey === '_some') {
+						const subQueryBuilder =
+							(filter: Filter, cases: Filter[]) => (subQueryKnex: Knex.QueryBuilder<any, unknown[]>) => {
+								const field = relation!.field;
+								const collection = relation!.collection;
+								const column = `${collection}.${field}`;
+
+								subQueryKnex
+									.select({ [field]: column })
+									.from(collection)
+									.whereNotNull(column);
+
+								applyQuery(knex, relation!.collection, subQueryKnex, { filter }, schema, cases, permissions);
+							};
+
+						const { cases: subCases } = getCases(relation!.collection, permissions, []);
+
+						if (childKey === '_none') {
+							dbQuery[logical].whereNotIn(
+								pkField as string,
+								subQueryBuilder(Object.values(value)[0] as Filter, subCases),
+							);
+
+							continue;
+						} else if (childKey === '_some') {
+							dbQuery[logical].whereIn(pkField as string, subQueryBuilder(Object.values(value)[0] as Filter, subCases));
+							continue;
+						}
+					}
 				}
-			} else if (subQuery === false) {
-				const pkField = `${collection}.${schema.collections[relation!.related_collection!].primary}`;
 
-				dbQuery[logical].whereIn(pkField, (subQueryKnex) => {
-					const field = relation!.field;
-					const collection = relation!.collection;
-					const column = `${collection}.${field}`;
-					subQueryKnex.select({ [field]: column }).from(collection);
+				if (filterPath.includes('_none') || filterPath.includes('_some')) {
+					throw new InvalidQueryError({
+						reason: `"${
+							filterPath.includes('_none') ? '_none' : '_some'
+						}" can only be used with top level relational alias field`,
+					});
+				}
 
-					applyQuery(
-						knex,
-						relation!.collection,
-						subQueryKnex,
-						{
-							filter: value,
-						},
-						schema,
-						true
-					);
+				const { columnPath, targetCollection, addNestedPkField } = getColumnPath({
+					path: filterPath,
+					collection,
+					relations,
+					aliasMap,
+					schema,
+				});
+
+				if (addNestedPkField) {
+					filterPath.push(addNestedPkField);
+				}
+
+				if (!columnPath) continue;
+
+				const { type, special } = getFilterType(
+					schema.collections[targetCollection]!.fields,
+					filterPath.at(-1)!,
+					targetCollection,
+				)!;
+
+				validateFilterOperator(type, filterOperator, special);
+
+				applyFilterToQuery(columnPath, filterOperator, filterValue, logical, targetCollection);
+			} else {
+				const { type, special } = getFilterType(schema.collections[collection]!.fields, filterPath[0]!, collection)!;
+
+				validateFilterOperator(type, filterOperator, special);
+
+				const aliasedCollection = aliasMap['']?.alias || collection;
+
+				applyFilterToQuery(`${aliasedCollection}.${filterPath[0]}`, filterOperator, filterValue, logical, collection);
+			}
+		}
+
+		function getFilterType(fields: Record<string, FieldOverview>, key: string, collection = 'unknown') {
+			const { fieldName, functionName } = parseFilterKey(key);
+
+			const field = fields[fieldName];
+
+			if (!field) {
+				throw new InvalidQueryError({ reason: `Invalid filter key "${key}" on "${collection}"` });
+			}
+
+			const { type } = field;
+
+			if (functionName) {
+				const availableFunctions: string[] = getFunctionsForType(type);
+
+				if (!availableFunctions.includes(functionName)) {
+					throw new InvalidQueryError({ reason: `Invalid filter key "${key}" on "${collection}"` });
+				}
+
+				const functionType = getOutputTypeForFunction(functionName as FieldFunction);
+
+				return { type: functionType };
+			}
+
+			return { type, special: field.special };
+		}
+
+		function validateFilterOperator(type: Type, filterOperator: string, special?: string[]) {
+			if (filterOperator.startsWith('_')) {
+				filterOperator = filterOperator.slice(1);
+			}
+
+			if (!getFilterOperatorsForType(type).includes(filterOperator as ClientFilterOperator)) {
+				throw new InvalidQueryError({
+					reason: `"${type}" field type does not contain the "_${filterOperator}" filter operator`,
+				});
+			}
+
+			if (
+				special?.includes('conceal') &&
+				!getFilterOperatorsForType('hash').includes(filterOperator as ClientFilterOperator)
+			) {
+				throw new InvalidQueryError({
+					reason: `Field with "conceal" special does not allow the "_${filterOperator}" filter operator`,
 				});
 			}
 		}
 
-		function applyFilterToQuery(key: string, operator: string, compareValue: any, logical: 'and' | 'or' = 'and') {
+		function applyFilterToQuery(
+			key: string,
+			operator: string,
+			compareValue: any,
+			logical: 'and' | 'or' = 'and',
+			originalCollectionName?: string,
+		) {
 			const [table, column] = key.split('.');
 
 			// Is processed through Knex.Raw, so should be safe to string-inject into these where queries
-			const selectionRaw = getColumn(knex, table, column, false) as any;
+			const selectionRaw = getColumn(knex, table!, column!, false, schema, { originalCollectionName }) as any;
 
 			// Knex supports "raw" in the columnName parameter, but isn't typed as such. Too bad..
 			// See https://github.com/knex/knex/issues/4518 @TODO remove as any once knex is updated
 
 			// These operators don't rely on a value, and can thus be used without one (eg `?filter[field][_null]`)
-			if (operator === '_null' || (operator === '_nnull' && compareValue === false)) {
+			if (
+				(operator === '_null' && compareValue !== false) ||
+				(operator === '_nnull' && compareValue === false) ||
+				(operator === '_eq' && compareValue === null)
+			) {
 				dbQuery[logical].whereNull(selectionRaw);
+				return;
 			}
 
-			if (operator === '_nnull' || (operator === '_null' && compareValue === false)) {
+			if (
+				(operator === '_nnull' && compareValue !== false) ||
+				(operator === '_null' && compareValue === false) ||
+				(operator === '_neq' && compareValue === null)
+			) {
 				dbQuery[logical].whereNotNull(selectionRaw);
+				return;
 			}
 
-			if (operator === '_empty' || (operator === '_nempty' && compareValue === false)) {
+			if ((operator === '_empty' && compareValue !== false) || (operator === '_nempty' && compareValue === false)) {
 				dbQuery[logical].andWhere((query) => {
-					query.where(key, '=', '');
+					query.whereNull(key).orWhere(key, '=', '');
 				});
 			}
 
-			if (operator === '_nempty' || (operator === '_empty' && compareValue === false)) {
+			if ((operator === '_nempty' && compareValue !== false) || (operator === '_empty' && compareValue === false)) {
 				dbQuery[logical].andWhere((query) => {
-					query.where(key, '!=', '');
+					query.whereNotNull(key).andWhere(key, '!=', '');
 				});
 			}
 
@@ -344,12 +752,54 @@ export function applyFilter(
 				compareValue = compareValue.filter((val) => val !== undefined);
 			}
 
+			// Cast filter value (compareValue) based on function used
+			if (column!.includes('(') && column!.includes(')')) {
+				const functionName = column!.split('(')[0] as FieldFunction;
+				const type = getOutputTypeForFunction(functionName);
+
+				if (['integer', 'float', 'decimal'].includes(type)) {
+					compareValue = Array.isArray(compareValue) ? compareValue.map(Number) : Number(compareValue);
+				}
+			}
+
+			// Cast filter value (compareValue) based on type of field being filtered against
+			const [collection, field] = key.split('.');
+			const mappedCollection = (originalCollectionName || collection)!;
+
+			if (mappedCollection! in schema.collections && field! in schema.collections[mappedCollection]!.fields) {
+				const type = schema.collections[mappedCollection]!.fields[field!]!.type;
+
+				if (['date', 'dateTime', 'time', 'timestamp'].includes(type)) {
+					if (Array.isArray(compareValue)) {
+						compareValue = compareValue.map((val) => helpers.date.parse(val));
+					} else {
+						compareValue = helpers.date.parse(compareValue);
+					}
+				}
+
+				if (['integer', 'float', 'decimal'].includes(type)) {
+					if (Array.isArray(compareValue)) {
+						compareValue = compareValue.map((val) => Number(val));
+					} else {
+						compareValue = Number(compareValue);
+					}
+				}
+			}
+
 			if (operator === '_eq') {
 				dbQuery[logical].where(selectionRaw, '=', compareValue);
 			}
 
 			if (operator === '_neq') {
 				dbQuery[logical].whereNot(selectionRaw, compareValue);
+			}
+
+			if (operator === '_ieq') {
+				dbQuery[logical].whereRaw(`LOWER(??) = ?`, [selectionRaw, `${compareValue.toLowerCase()}`]);
+			}
+
+			if (operator === '_nieq') {
+				dbQuery[logical].whereRaw(`LOWER(??) <> ?`, [selectionRaw, `${compareValue.toLowerCase()}`]);
 			}
 
 			if (operator === '_contains') {
@@ -360,6 +810,14 @@ export function applyFilter(
 				dbQuery[logical].whereNot(selectionRaw, 'like', `%${compareValue}%`);
 			}
 
+			if (operator === '_icontains') {
+				dbQuery[logical].whereRaw(`LOWER(??) LIKE ?`, [selectionRaw, `%${compareValue.toLowerCase()}%`]);
+			}
+
+			if (operator === '_nicontains') {
+				dbQuery[logical].whereRaw(`LOWER(??) NOT LIKE ?`, [selectionRaw, `%${compareValue.toLowerCase()}%`]);
+			}
+
 			if (operator === '_starts_with') {
 				dbQuery[logical].where(key, 'like', `${compareValue}%`);
 			}
@@ -368,12 +826,28 @@ export function applyFilter(
 				dbQuery[logical].whereNot(key, 'like', `${compareValue}%`);
 			}
 
+			if (operator === '_istarts_with') {
+				dbQuery[logical].whereRaw(`LOWER(??) LIKE ?`, [selectionRaw, `${compareValue.toLowerCase()}%`]);
+			}
+
+			if (operator === '_nistarts_with') {
+				dbQuery[logical].whereRaw(`LOWER(??) NOT LIKE ?`, [selectionRaw, `${compareValue.toLowerCase()}%`]);
+			}
+
 			if (operator === '_ends_with') {
 				dbQuery[logical].where(key, 'like', `%${compareValue}`);
 			}
 
 			if (operator === '_nends_with') {
 				dbQuery[logical].whereNot(key, 'like', `%${compareValue}`);
+			}
+
+			if (operator === '_iends_with') {
+				dbQuery[logical].whereRaw(`LOWER(??) LIKE ?`, [selectionRaw, `%${compareValue.toLowerCase()}`]);
+			}
+
+			if (operator === '_niends_with') {
+				dbQuery[logical].whereRaw(`LOWER(??) NOT LIKE ?`, [selectionRaw, `%${compareValue.toLowerCase()}`]);
 			}
 
 			if (operator === '_gt') {
@@ -407,187 +881,184 @@ export function applyFilter(
 			}
 
 			if (operator === '_between') {
-				if (compareValue.length !== 2) return;
-
 				let value = compareValue;
 				if (typeof value === 'string') value = value.split(',');
+
+				if (value.length !== 2) return;
 
 				dbQuery[logical].whereBetween(selectionRaw, value);
 			}
 
 			if (operator === '_nbetween') {
-				if (compareValue.length !== 2) return;
-
 				let value = compareValue;
 				if (typeof value === 'string') value = value.split(',');
+
+				if (value.length !== 2) return;
 
 				dbQuery[logical].whereNotBetween(selectionRaw, value);
 			}
 
-			const geometryHelper = getGeometryHelper();
-
 			if (operator == '_intersects') {
-				dbQuery[logical].whereRaw(geometryHelper.intersects(key, compareValue));
+				dbQuery[logical].whereRaw(helpers.st.intersects(key, compareValue));
 			}
 
 			if (operator == '_nintersects') {
-				dbQuery[logical].whereRaw(geometryHelper.nintersects(key, compareValue));
+				dbQuery[logical].whereRaw(helpers.st.nintersects(key, compareValue));
 			}
+
 			if (operator == '_intersects_bbox') {
-				dbQuery[logical].whereRaw(geometryHelper.intersects_bbox(key, compareValue));
+				dbQuery[logical].whereRaw(helpers.st.intersects_bbox(key, compareValue));
 			}
 
 			if (operator == '_nintersects_bbox') {
-				dbQuery[logical].whereRaw(geometryHelper.nintersects_bbox(key, compareValue));
-			}
-		}
-
-		function getWhereColumn(path: string[], collection: string) {
-			return followRelation(path);
-
-			function followRelation(
-				pathParts: string[],
-				parentCollection: string = collection,
-				parentAlias?: string
-			): string | void {
-				/**
-				 * For M2A fields, the path can contain an optional collection scope <field>:<scope>
-				 */
-				const pathRoot = pathParts[0].split(':')[0];
-
-				const relation = relations.find((relation) => {
-					return (
-						(relation.collection === parentCollection && relation.field === pathRoot) ||
-						(relation.related_collection === parentCollection && relation.meta?.one_field === pathRoot)
-					);
-				});
-
-				if (!relation) {
-					throw new InvalidQueryException(`"${parentCollection}.${pathRoot}" is not a relational field`);
-				}
-
-				const relationType = getRelationType({ relation, collection: parentCollection, field: pathRoot });
-
-				const alias = get(aliasMap, parentAlias ? [parentAlias, ...pathParts] : pathParts);
-
-				const remainingParts = pathParts.slice(1);
-
-				let parent: string;
-
-				if (relationType === 'm2a') {
-					const pathScope = pathParts[0].split(':')[1];
-
-					if (!pathScope) {
-						throw new InvalidQueryException(
-							`You have to provide a collection scope when filtering on a many-to-any item`
-						);
-					}
-
-					parent = pathScope;
-				} else if (relationType === 'm2o') {
-					parent = relation.related_collection!;
-				} else {
-					parent = relation.collection;
-				}
-
-				if (remainingParts.length === 1) {
-					return `${alias || parent}.${remainingParts[0]}`;
-				}
-
-				if (remainingParts.length) {
-					return followRelation(remainingParts, parent, alias);
-				}
+				dbQuery[logical].whereRaw(helpers.st.nintersects_bbox(key, compareValue));
 			}
 		}
 	}
 }
 
-export async function applySearch(
+export function applySearch(
+	knex: Knex,
 	schema: SchemaOverview,
 	dbQuery: Knex.QueryBuilder,
 	searchQuery: string,
-	collection: string
-): Promise<void> {
-	const fields = Object.entries(schema.collections[collection].fields);
+	collection: string,
+) {
+	const { number: numberHelper } = getHelpers(knex);
+	const fields = Object.entries(schema.collections[collection]!.fields);
 
 	dbQuery.andWhere(function () {
+		let needsFallbackCondition = true;
+
 		fields.forEach(([name, field]) => {
 			if (['text', 'string'].includes(field.type)) {
 				this.orWhereRaw(`LOWER(??) LIKE ?`, [`${collection}.${name}`, `%${searchQuery.toLowerCase()}%`]);
-			} else if (['bigInteger', 'integer', 'decimal', 'float'].includes(field.type)) {
-				const number = Number(searchQuery);
-				if (!isNaN(number)) this.orWhere({ [`${collection}.${name}`]: number });
-			} else if (field.type === 'uuid' && validate(searchQuery)) {
+				needsFallbackCondition = false;
+			} else if (isNumericField(field)) {
+				const number = parseNumericString(searchQuery);
+
+				if (number === null) {
+					return; // unable to parse
+				}
+
+				if (numberHelper.isNumberValid(number, field)) {
+					numberHelper.addSearchCondition(this, collection, name, number);
+					needsFallbackCondition = false;
+				}
+			} else if (field.type === 'uuid' && isValidUuid(searchQuery)) {
 				this.orWhere({ [`${collection}.${name}`]: searchQuery });
+				needsFallbackCondition = false;
 			}
 		});
+
+		if (needsFallbackCondition) {
+			this.orWhereRaw('1 = 0');
+		}
 	});
 }
 
-export function applyAggregate(dbQuery: Knex.QueryBuilder, aggregate: Aggregate): void {
+export function applyAggregate(
+	schema: SchemaOverview,
+	dbQuery: Knex.QueryBuilder,
+	aggregate: Aggregate,
+	collection: string,
+	hasJoins: boolean,
+): void {
 	for (const [operation, fields] of Object.entries(aggregate)) {
 		if (!fields) continue;
 
 		for (const field of fields) {
 			if (operation === 'avg') {
-				dbQuery.avg(field, { as: `avg->${field}` });
+				dbQuery.avg(`${collection}.${field}`, { as: `avg->${field}` });
 			}
 
 			if (operation === 'avgDistinct') {
-				dbQuery.avgDistinct(field, { as: `avgDistinct->${field}` });
+				dbQuery.avgDistinct(`${collection}.${field}`, { as: `avgDistinct->${field}` });
+			}
+
+			if (operation === 'countAll') {
+				dbQuery.count('*', { as: 'countAll' });
 			}
 
 			if (operation === 'count') {
 				if (field === '*') {
 					dbQuery.count('*', { as: 'count' });
 				} else {
-					dbQuery.count(field, { as: `count->${field}` });
+					dbQuery.count(`${collection}.${field}`, { as: `count->${field}` });
 				}
 			}
 
 			if (operation === 'countDistinct') {
-				dbQuery.countDistinct(field, { as: `countDistinct->${field}` });
+				if (!hasJoins && schema.collections[collection]?.primary === field) {
+					// Optimize to count as primary keys are unique
+					dbQuery.count(`${collection}.${field}`, { as: `countDistinct->${field}` });
+				} else {
+					dbQuery.countDistinct(`${collection}.${field}`, { as: `countDistinct->${field}` });
+				}
 			}
 
 			if (operation === 'sum') {
-				dbQuery.sum(field, { as: `sum->${field}` });
+				dbQuery.sum(`${collection}.${field}`, { as: `sum->${field}` });
 			}
 
 			if (operation === 'sumDistinct') {
-				dbQuery.sumDistinct(field, { as: `sumDistinct->${field}` });
+				dbQuery.sumDistinct(`${collection}.${field}`, { as: `sumDistinct->${field}` });
 			}
 
 			if (operation === 'min') {
-				dbQuery.min(field, { as: `min->${field}` });
+				dbQuery.min(`${collection}.${field}`, { as: `min->${field}` });
 			}
 
 			if (operation === 'max') {
-				dbQuery.max(field, { as: `max->${field}` });
+				dbQuery.max(`${collection}.${field}`, { as: `max->${field}` });
 			}
 		}
 	}
 }
 
+export function joinFilterWithCases(filter: Filter | null | undefined, cases: Filter[]) {
+	if (cases.length > 0 && !filter) {
+		return { _or: cases };
+	} else if (filter && cases.length === 0) {
+		return filter ?? null;
+	} else if (filter && cases.length > 0) {
+		return { _and: [filter, { _or: cases }] };
+	}
+
+	return null;
+}
+
 function getFilterPath(key: string, value: Record<string, any>) {
 	const path = [key];
+	const childKey = Object.keys(value)[0];
 
-	if (typeof Object.keys(value)[0] === 'string' && Object.keys(value)[0].startsWith('_') === true) {
+	if (!childKey || (childKey.startsWith('_') === true && !['_none', '_some'].includes(childKey))) {
 		return path;
 	}
 
 	if (isPlainObject(value)) {
-		path.push(...getFilterPath(Object.keys(value)[0], Object.values(value)[0]));
+		path.push(...getFilterPath(childKey, Object.values(value)[0]));
 	}
 
 	return path;
 }
 
-function getOperation(key: string, value: Record<string, any>): { operator: string; value: any } {
-	if (key.startsWith('_') && key !== '_and' && key !== '_or') {
-		return { operator: key as string, value };
-	} else if (isPlainObject(value) === false) {
+function getOperation(key: string, value: Record<string, any>): { operator: string; value: any } | null {
+	if (key.startsWith('_') && !['_and', '_or', '_none', '_some'].includes(key)) {
+		return { operator: key, value };
+	} else if (!isPlainObject(value)) {
 		return { operator: '_eq', value };
 	}
 
-	return getOperation(Object.keys(value)[0], Object.values(value)[0]);
+	const childKey = Object.keys(value)[0];
+
+	if (childKey) {
+		return getOperation(childKey, Object.values(value)[0]);
+	}
+
+	return null;
+}
+
+function isNumericField(field: FieldOverview): field is FieldOverview & { type: NumericType } {
+	return isIn(field.type, NUMERIC_TYPES);
 }

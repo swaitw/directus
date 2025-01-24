@@ -1,41 +1,54 @@
-import SchemaInspector from '@directus/schema';
-import { Knex } from 'knex';
-import { getCache } from '../cache';
-import { ALIAS_TYPES } from '../constants';
-import getDatabase, { getSchemaInspector } from '../database';
-import { systemCollectionRows } from '../database/system-data/collections';
-import env from '../env';
-import { ForbiddenException, InvalidPayloadException } from '../exceptions';
-import logger from '../logger';
-import { FieldsService } from '../services/fields';
-import { ItemsService, MutationOptions } from '../services/items';
-import Keyv from 'keyv';
-import { AbstractServiceOptions, Collection, CollectionMeta, SchemaOverview } from '../types';
-import { Accountability, FieldMeta, RawField } from '@directus/shared/types';
+import { useEnv } from '@directus/env';
+import { ForbiddenError, InvalidPayloadError } from '@directus/errors';
+import type { SchemaInspector, Table } from '@directus/schema';
+import { createInspector } from '@directus/schema';
+import { systemCollectionRows, type BaseCollectionMeta } from '@directus/system-data';
+import type { Accountability, FieldMeta, RawField, SchemaOverview } from '@directus/types';
+import { addFieldFlag } from '@directus/utils';
+import type Keyv from 'keyv';
+import type { Knex } from 'knex';
+import { chunk, groupBy, merge, omit } from 'lodash-es';
+import { clearSystemCache, getCache } from '../cache.js';
+import { ALIAS_TYPES } from '../constants.js';
+import type { Helpers } from '../database/helpers/index.js';
+import { getHelpers } from '../database/helpers/index.js';
+import getDatabase, { getSchemaInspector } from '../database/index.js';
+import emitter from '../emitter.js';
+import { fetchAllowedCollections } from '../permissions/modules/fetch-allowed-collections/fetch-allowed-collections.js';
+import { validateAccess } from '../permissions/modules/validate-access/validate-access.js';
+import type { AbstractServiceOptions, ActionEventParams, Collection, MutationOptions } from '../types/index.js';
+import { getSchema } from '../utils/get-schema.js';
+import { shouldClearCache } from '../utils/should-clear-cache.js';
+import { transaction } from '../utils/transaction.js';
+import { FieldsService } from './fields.js';
+import { ItemsService } from './items.js';
 
 export type RawCollection = {
 	collection: string;
 	fields?: RawField[];
-	meta?: Partial<CollectionMeta> | null;
+	schema?: Partial<Table> | null;
+	meta?: Partial<BaseCollectionMeta> | null;
 };
 
 export class CollectionsService {
 	knex: Knex;
+	helpers: Helpers;
 	accountability: Accountability | null;
-	schemaInspector: ReturnType<typeof SchemaInspector>;
+	schemaInspector: SchemaInspector;
 	schema: SchemaOverview;
 	cache: Keyv<any> | null;
-	schemaCache: Keyv<any> | null;
+	systemCache: Keyv<any>;
 
 	constructor(options: AbstractServiceOptions) {
 		this.knex = options.knex || getDatabase();
+		this.helpers = getHelpers(this.knex);
 		this.accountability = options.accountability || null;
-		this.schemaInspector = options.knex ? SchemaInspector(options.knex) : getSchemaInspector();
+		this.schemaInspector = options.knex ? createInspector(options.knex) : getSchemaInspector();
 		this.schema = options.schema;
 
-		const { cache, schemaCache } = getCache();
+		const { cache, systemCache } = getCache();
 		this.cache = cache;
-		this.schemaCache = schemaCache;
+		this.systemCache = systemCache;
 	}
 
 	/**
@@ -43,140 +56,222 @@ export class CollectionsService {
 	 */
 	async createOne(payload: RawCollection, opts?: MutationOptions): Promise<string> {
 		if (this.accountability && this.accountability.admin !== true) {
-			throw new ForbiddenException();
+			throw new ForbiddenError();
 		}
 
-		if (!payload.collection) throw new InvalidPayloadException(`"collection" is required`);
+		if (!payload.collection) throw new InvalidPayloadError({ reason: `"collection" is required` });
 
-		// Directus heavily relies on the primary key of a collection, so we have to make sure that
-		// every collection that is created has a primary key. If no primary key field is created
-		// while making the collection, we default to an auto incremented id named `id`
-		if (!payload.fields)
-			payload.fields = [
-				{
-					field: 'id',
-					type: 'integer',
-					meta: {
-						hidden: true,
-						interface: 'numeric',
-						readonly: true,
-					},
-					schema: {
-						is_primary_key: true,
-						has_auto_increment: true,
-					},
-				},
+		if (payload.collection.startsWith('directus_')) {
+			throw new InvalidPayloadError({ reason: `Collections can't start with "directus_"` });
+		}
+
+		const nestedActionEvents: ActionEventParams[] = [];
+
+		try {
+			const existingCollections: string[] = [
+				...((await this.knex.select('collection').from('directus_collections'))?.map(({ collection }) => collection) ??
+					[]),
+				...Object.keys(this.schema.collections),
 			];
 
-		// Ensure that every field meta has the field/collection fields filled correctly
-		payload.fields = payload.fields.map((field) => {
-			if (field.meta) {
-				field.meta = {
-					...field.meta,
-					field: field.field,
-					collection: payload.collection!,
-				};
+			if (existingCollections.includes(payload.collection)) {
+				throw new InvalidPayloadError({ reason: `Collection "${payload.collection}" already exists` });
 			}
 
-			return field;
-		});
-
-		// Create the collection/fields in a transaction so it'll be reverted in case of errors or
-		// permission problems. This might not work reliably in MySQL, as it doesn't support DDL in
-		// transactions.
-		await this.knex.transaction(async (trx) => {
-			const fieldsService = new FieldsService({ knex: trx, schema: this.schema });
-
-			// This operation is locked to admin users only, so we don't have to worry about the order
-			// of operations here with regards to permissions checks
-
-			const collectionItemsService = new ItemsService('directus_collections', {
-				knex: trx,
-				accountability: this.accountability,
-				schema: this.schema,
-			});
-
-			const fieldItemsService = new ItemsService('directus_fields', {
-				knex: trx,
-				accountability: this.accountability,
-				schema: this.schema,
-			});
-
-			if (payload.collection.startsWith('directus_')) {
-				throw new InvalidPayloadException(`Collections can't start with "directus_"`);
-			}
-
-			if (payload.collection in this.schema.collections) {
-				throw new InvalidPayloadException(`Collection "${payload.collection}" already exists.`);
-			}
-
-			await trx.schema.createTable(payload.collection, (table) => {
-				for (const field of payload.fields!) {
-					if (field.type && ALIAS_TYPES.includes(field.type) === false) {
-						fieldsService.addColumnToTable(table, field);
+			// Create the collection/fields in a transaction so it'll be reverted in case of errors or
+			// permission problems. This might not work reliably in MySQL, as it doesn't support DDL in
+			// transactions.
+			await transaction(this.knex, async (trx) => {
+				if (payload.schema) {
+					// Directus heavily relies on the primary key of a collection, so we have to make sure that
+					// every collection that is created has a primary key. If no primary key field is created
+					// while making the collection, we default to an auto incremented id named `id`
+					if (!payload.fields) {
+						payload.fields = [
+							{
+								field: 'id',
+								type: 'integer',
+								meta: {
+									hidden: true,
+									interface: 'numeric',
+									readonly: true,
+								},
+								schema: {
+									is_primary_key: true,
+									has_auto_increment: true,
+								},
+							},
+						];
 					}
+
+					// Ensure that every field meta has the field/collection fields filled correctly
+					payload.fields = payload.fields.map((field) => {
+						if (field.meta) {
+							field.meta = {
+								...field.meta,
+								field: field.field,
+								collection: payload.collection!,
+							};
+						}
+
+						// Add flag for specific database type overrides
+						const flagToAdd = this.helpers.date.fieldFlagForField(field.type);
+
+						if (flagToAdd) {
+							addFieldFlag(field, flagToAdd);
+						}
+
+						return field;
+					});
+
+					const fieldsService = new FieldsService({ knex: trx, schema: this.schema });
+
+					await trx.schema.createTable(payload.collection, (table) => {
+						for (const field of payload.fields!) {
+							if (field.type && ALIAS_TYPES.includes(field.type) === false) {
+								fieldsService.addColumnToTable(table, payload.collection, field);
+							}
+						}
+					});
+
+					const fieldItemsService = new ItemsService('directus_fields', {
+						knex: trx,
+						accountability: this.accountability,
+						schema: this.schema,
+					});
+
+					const fieldPayloads = payload.fields!.filter((field) => field.meta).map((field) => field.meta) as FieldMeta[];
+
+					// Sort new fields that does not have any group defined, in ascending order.
+					// Lodash merge is used so that the "sort" can be overridden if defined.
+					let sortedFieldPayloads = fieldPayloads
+						.filter((field) => field?.group === undefined || field?.group === null)
+						.map((field, index) => merge({ sort: index + 1 }, field));
+
+					// Sort remaining new fields with group defined, if any, in ascending order.
+					// sortedFieldPayloads will be less than fieldPayloads if it filtered out any fields with group defined.
+					if (sortedFieldPayloads.length < fieldPayloads.length) {
+						const fieldsWithGroups = groupBy(
+							fieldPayloads.filter((field) => field?.group),
+							(field) => field?.group,
+						);
+
+						// The sort order is restarted from 1 for fields in each group and appended to sortedFieldPayloads.
+						// Lodash merge is used so that the "sort" can be overridden if defined.
+						for (const [_group, fields] of Object.entries(fieldsWithGroups)) {
+							sortedFieldPayloads = sortedFieldPayloads.concat(
+								fields.map((field, index) => merge({ sort: index + 1 }, field)),
+							);
+						}
+					}
+
+					await fieldItemsService.createMany(sortedFieldPayloads, {
+						bypassEmitAction: (params) =>
+							opts?.bypassEmitAction ? opts.bypassEmitAction(params) : nestedActionEvents.push(params),
+						bypassLimits: true,
+					});
 				}
-			});
 
-			await collectionItemsService.createOne({
-				...(payload.meta || {}),
-				collection: payload.collection,
-			});
+				if (payload.meta) {
+					const collectionsItemsService = new ItemsService('directus_collections', {
+						knex: trx,
+						accountability: this.accountability,
+						schema: this.schema,
+					});
 
-			const fieldPayloads = payload.fields!.filter((field) => field.meta).map((field) => field.meta) as FieldMeta[];
-			await fieldItemsService.createMany(fieldPayloads);
+					await collectionsItemsService.createOne(
+						{
+							...payload.meta,
+							collection: payload.collection,
+						},
+						{
+							bypassEmitAction: (params) =>
+								opts?.bypassEmitAction ? opts.bypassEmitAction(params) : nestedActionEvents.push(params),
+						},
+					);
+				}
+
+				return payload.collection;
+			});
 
 			return payload.collection;
-		});
+		} finally {
+			if (shouldClearCache(this.cache, opts)) {
+				await this.cache.clear();
+			}
 
-		if (this.cache && env.CACHE_AUTO_PURGE && opts?.autoPurgeCache !== false) {
-			await this.cache.clear();
+			if (opts?.autoPurgeSystemCache !== false) {
+				await clearSystemCache({ autoPurgeCache: opts?.autoPurgeCache });
+			}
+
+			if (opts?.emitEvents !== false && nestedActionEvents.length > 0) {
+				const updatedSchema = await getSchema();
+
+				for (const nestedActionEvent of nestedActionEvents) {
+					nestedActionEvent.context.schema = updatedSchema;
+					emitter.emitAction(nestedActionEvent.event, nestedActionEvent.meta, nestedActionEvent.context);
+				}
+			}
 		}
-
-		if (this.schemaCache) {
-			await this.schemaCache.clear();
-		}
-
-		return payload.collection;
 	}
 
 	/**
 	 * Create multiple new collections
 	 */
 	async createMany(payloads: RawCollection[], opts?: MutationOptions): Promise<string[]> {
-		const collections = await this.knex.transaction(async (trx) => {
-			const service = new CollectionsService({
-				schema: this.schema,
-				accountability: this.accountability,
-				knex: trx,
+		const nestedActionEvents: ActionEventParams[] = [];
+
+		try {
+			const collections = await transaction(this.knex, async (trx) => {
+				const service = new CollectionsService({
+					schema: this.schema,
+					accountability: this.accountability,
+					knex: trx,
+				});
+
+				const collectionNames: string[] = [];
+
+				for (const payload of payloads) {
+					const name = await service.createOne(payload, {
+						autoPurgeCache: false,
+						autoPurgeSystemCache: false,
+						bypassEmitAction: (params) => nestedActionEvents.push(params),
+					});
+
+					collectionNames.push(name);
+				}
+
+				return collectionNames;
 			});
 
-			const collectionNames: string[] = [];
-
-			for (const payload of payloads) {
-				const name = await service.createOne(payload, { autoPurgeCache: false });
-				collectionNames.push(name);
+			return collections;
+		} finally {
+			if (shouldClearCache(this.cache, opts)) {
+				await this.cache.clear();
 			}
 
-			return collectionNames;
-		});
+			if (opts?.autoPurgeSystemCache !== false) {
+				await clearSystemCache({ autoPurgeCache: opts?.autoPurgeCache });
+			}
 
-		if (this.cache && env.CACHE_AUTO_PURGE && opts?.autoPurgeCache !== false) {
-			await this.cache.clear();
+			if (opts?.emitEvents !== false && nestedActionEvents.length > 0) {
+				const updatedSchema = await getSchema();
+
+				for (const nestedActionEvent of nestedActionEvents) {
+					nestedActionEvent.context.schema = updatedSchema;
+					emitter.emitAction(nestedActionEvent.event, nestedActionEvent.meta, nestedActionEvent.context);
+				}
+			}
 		}
-
-		if (this.schemaCache) {
-			await this.schemaCache.clear();
-		}
-
-		return collections;
 	}
 
 	/**
 	 * Read all collections. Currently doesn't support any query.
 	 */
 	async readByQuery(): Promise<Collection[]> {
-		const collectionItemsService = new ItemsService('directus_collections', {
+		const env = useEnv();
+
+		const collectionsItemsService = new ItemsService('directus_collections', {
 			knex: this.knex,
 			schema: this.schema,
 			accountability: this.accountability,
@@ -184,47 +279,77 @@ export class CollectionsService {
 
 		let tablesInDatabase = await this.schemaInspector.tableInfo();
 
+		let meta = (await collectionsItemsService.readByQuery({
+			limit: -1,
+		})) as BaseCollectionMeta[];
+
+		meta.push(...systemCollectionRows);
+
 		if (this.accountability && this.accountability.admin !== true) {
-			const collectionsYouHavePermissionToRead: string[] = this.schema.permissions
-				.filter((permission) => {
-					return permission.action === 'read';
-				})
-				.map(({ collection }) => collection);
+			const collectionsGroups: { [key: string]: string } = meta.reduce(
+				(meta, item) => ({
+					...meta,
+					[item.collection]: item.group,
+				}),
+				{},
+			);
+
+			let collectionsYouHavePermissionToRead = await fetchAllowedCollections(
+				{
+					accountability: this.accountability,
+					action: 'read',
+				},
+				{
+					knex: this.knex,
+					schema: this.schema,
+				},
+			);
+
+			for (const collection of collectionsYouHavePermissionToRead) {
+				const group = collectionsGroups[collection];
+				if (group) collectionsYouHavePermissionToRead.push(group);
+				delete collectionsGroups[collection];
+			}
+
+			collectionsYouHavePermissionToRead = [...new Set([...collectionsYouHavePermissionToRead])];
 
 			tablesInDatabase = tablesInDatabase.filter((table) => {
 				return collectionsYouHavePermissionToRead.includes(table.name);
 			});
+
+			meta = meta.filter((collectionMeta) => {
+				return collectionsYouHavePermissionToRead.includes(collectionMeta.collection);
+			});
 		}
-
-		const tablesToFetchInfoFor = tablesInDatabase.map((table) => table.name);
-
-		const meta = (await collectionItemsService.readByQuery({
-			filter: { collection: { _in: tablesToFetchInfoFor } },
-			limit: -1,
-		})) as CollectionMeta[];
-
-		meta.push(...systemCollectionRows);
 
 		const collections: Collection[] = [];
 
-		/**
-		 * The collections as known in the schema cache.
-		 */
-		const knownCollections = Object.keys(this.schema.collections);
-
-		for (const table of tablesInDatabase) {
+		for (const collectionMeta of meta) {
 			const collection: Collection = {
-				collection: table.name,
-				meta: meta.find((systemInfo) => systemInfo?.collection === table.name) || null,
-				schema: table,
+				collection: collectionMeta.collection,
+				meta: collectionMeta,
+				schema: tablesInDatabase.find((table) => table.name === collectionMeta.collection) ?? null,
 			};
 
-			// By only returning collections that are known in the schema cache, we prevent weird
-			// situations where the collections endpoint returns different info from every other
-			// collection
-			if (knownCollections.includes(table.name)) {
-				collections.push(collection);
+			collections.push(collection);
+		}
+
+		for (const table of tablesInDatabase) {
+			const exists = !!collections.find(({ collection }) => collection === table.name);
+
+			if (!exists) {
+				collections.push({
+					collection: table.name,
+					schema: table,
+					meta: null,
+				});
 			}
+		}
+
+		if (env['DB_EXCLUDE_TABLES']) {
+			return collections.filter(
+				(collection) => (env['DB_EXCLUDE_TABLES'] as string[]).includes(collection.collection) === false,
+			);
 		}
 
 		return collections;
@@ -235,65 +360,37 @@ export class CollectionsService {
 	 */
 	async readOne(collectionKey: string): Promise<Collection> {
 		const result = await this.readMany([collectionKey]);
-		return result[0];
+
+		if (result.length === 0) throw new ForbiddenError();
+
+		return result[0]!;
 	}
 
 	/**
 	 * Read many collections by name
 	 */
 	async readMany(collectionKeys: string[]): Promise<Collection[]> {
-		const collectionItemsService = new ItemsService('directus_collections', {
-			knex: this.knex,
-			accountability: this.accountability,
-			schema: this.schema,
-		});
-
-		if (this.accountability && this.accountability.admin !== true) {
-			const permissions = this.schema.permissions.filter((permission) => {
-				return permission.action === 'read' && collectionKeys.includes(permission.collection);
-			});
-
-			if (collectionKeys.length !== permissions.length) {
-				const collectionsYouHavePermissionToRead = permissions.map(({ collection }) => collection);
-
-				for (const collectionKey of collectionKeys) {
-					if (collectionsYouHavePermissionToRead.includes(collectionKey) === false) {
-						throw new ForbiddenException();
-					}
-				}
-			}
+		if (this.accountability) {
+			await Promise.all(
+				collectionKeys.map((collection) =>
+					validateAccess(
+						{
+							accountability: this.accountability!,
+							action: 'read',
+							collection,
+							skipCollectionExistsCheck: true,
+						},
+						{
+							schema: this.schema,
+							knex: this.knex,
+						},
+					),
+				),
+			);
 		}
 
-		const tablesInDatabase = await this.schemaInspector.tableInfo();
-		const tables = tablesInDatabase.filter((table) => collectionKeys.includes(table.name));
-
-		const meta = (await collectionItemsService.readByQuery({
-			filter: { collection: { _in: collectionKeys } },
-			limit: -1,
-		})) as CollectionMeta[];
-
-		meta.push(...systemCollectionRows);
-
-		const collections: Collection[] = [];
-
-		const knownCollections = Object.keys(this.schema.collections);
-
-		for (const table of tables) {
-			const collection: Collection = {
-				collection: table.name,
-				meta: meta.find((systemInfo) => systemInfo?.collection === table.name) || null,
-				schema: table,
-			};
-
-			// By only returning collections that are known in the schema cache, we prevent weird
-			// situations where the collections endpoint returns different info from every other
-			// collection
-			if (knownCollections.includes(table.name)) {
-				collections.push(collection);
-			}
-		}
-
-		return collections;
+		const collections = await this.readByQuery();
+		return collections.filter(({ collection }) => collectionKeys.includes(collection));
 	}
 
 	/**
@@ -301,42 +398,127 @@ export class CollectionsService {
 	 */
 	async updateOne(collectionKey: string, data: Partial<Collection>, opts?: MutationOptions): Promise<string> {
 		if (this.accountability && this.accountability.admin !== true) {
-			throw new ForbiddenException();
+			throw new ForbiddenError();
 		}
 
-		const collectionItemsService = new ItemsService('directus_collections', {
-			knex: this.knex,
-			accountability: this.accountability,
-			schema: this.schema,
-		});
+		const nestedActionEvents: ActionEventParams[] = [];
 
-		const payload = data as Partial<Collection>;
+		try {
+			const collectionsItemsService = new ItemsService('directus_collections', {
+				knex: this.knex,
+				accountability: this.accountability,
+				schema: this.schema,
+			});
 
-		if (!payload.meta) {
+			const payload = data as Partial<Collection>;
+
+			if (!payload.meta) {
+				return collectionKey;
+			}
+
+			const exists = !!(await this.knex
+				.select('collection')
+				.from('directus_collections')
+				.where({ collection: collectionKey })
+				.first());
+
+			if (exists) {
+				await collectionsItemsService.updateOne(collectionKey, payload.meta, {
+					...opts,
+					bypassEmitAction: (params) =>
+						opts?.bypassEmitAction ? opts.bypassEmitAction(params) : nestedActionEvents.push(params),
+				});
+			} else {
+				await collectionsItemsService.createOne(
+					{ ...payload.meta, collection: collectionKey },
+					{
+						...opts,
+						bypassEmitAction: (params) =>
+							opts?.bypassEmitAction ? opts.bypassEmitAction(params) : nestedActionEvents.push(params),
+					},
+				);
+			}
+
 			return collectionKey;
+		} finally {
+			if (shouldClearCache(this.cache, opts)) {
+				await this.cache.clear();
+			}
+
+			if (opts?.autoPurgeSystemCache !== false) {
+				await clearSystemCache({ autoPurgeCache: opts?.autoPurgeCache });
+			}
+
+			if (opts?.emitEvents !== false && nestedActionEvents.length > 0) {
+				const updatedSchema = await getSchema();
+
+				for (const nestedActionEvent of nestedActionEvents) {
+					nestedActionEvent.context.schema = updatedSchema;
+					emitter.emitAction(nestedActionEvent.event, nestedActionEvent.meta, nestedActionEvent.context);
+				}
+			}
+		}
+	}
+
+	/**
+	 * Update multiple collections in a single transaction
+	 */
+	async updateBatch(data: Partial<Collection>[], opts?: MutationOptions): Promise<string[]> {
+		if (this.accountability && this.accountability.admin !== true) {
+			throw new ForbiddenError();
 		}
 
-		const exists = !!(await this.knex
-			.select('collection')
-			.from('directus_collections')
-			.where({ collection: collectionKey })
-			.first());
-
-		if (exists) {
-			await collectionItemsService.updateOne(collectionKey, payload.meta, opts);
-		} else {
-			await collectionItemsService.createOne({ ...payload.meta, collection: collectionKey }, opts);
+		if (!Array.isArray(data)) {
+			throw new InvalidPayloadError({ reason: 'Input should be an array of collection changes' });
 		}
 
-		if (this.cache && env.CACHE_AUTO_PURGE && opts?.autoPurgeCache !== false) {
-			await this.cache.clear();
+		const collectionKey = 'collection';
+		const collectionKeys: string[] = [];
+		const nestedActionEvents: ActionEventParams[] = [];
+
+		try {
+			await transaction(this.knex, async (trx) => {
+				const collectionItemsService = new CollectionsService({
+					knex: trx,
+					accountability: this.accountability,
+					schema: this.schema,
+				});
+
+				for (const payload of data) {
+					if (!payload[collectionKey]) {
+						throw new InvalidPayloadError({ reason: `Collection in update misses collection key` });
+					}
+
+					await collectionItemsService.updateOne(payload[collectionKey], omit(payload, collectionKey), {
+						autoPurgeCache: false,
+						autoPurgeSystemCache: false,
+						bypassEmitAction: (params) =>
+							opts?.bypassEmitAction ? opts.bypassEmitAction(params) : nestedActionEvents.push(params),
+					});
+
+					collectionKeys.push(payload[collectionKey]);
+				}
+			});
+		} finally {
+			if (shouldClearCache(this.cache, opts)) {
+				await this.cache.clear();
+			}
+
+			if (opts?.autoPurgeSystemCache !== false) {
+				await clearSystemCache({ autoPurgeCache: opts?.autoPurgeCache });
+			}
+
+			if (opts?.emitEvents !== false && nestedActionEvents.length > 0) {
+				const updatedSchema = await getSchema();
+
+				for (const nestedActionEvent of nestedActionEvents) {
+					nestedActionEvent.context.schema = updatedSchema;
+					emitter.emitAction(nestedActionEvent.event, nestedActionEvent.meta, nestedActionEvent.context);
+				}
+			}
 		}
 
-		if (this.schemaCache) {
-			await this.schemaCache.clear();
-		}
-
-		return collectionKey;
+		return collectionKeys;
 	}
 
 	/**
@@ -344,30 +526,47 @@ export class CollectionsService {
 	 */
 	async updateMany(collectionKeys: string[], data: Partial<Collection>, opts?: MutationOptions): Promise<string[]> {
 		if (this.accountability && this.accountability.admin !== true) {
-			throw new ForbiddenException();
+			throw new ForbiddenError();
 		}
 
-		await this.knex.transaction(async (trx) => {
-			const service = new CollectionsService({
-				schema: this.schema,
-				accountability: this.accountability,
-				knex: trx,
+		const nestedActionEvents: ActionEventParams[] = [];
+
+		try {
+			await transaction(this.knex, async (trx) => {
+				const service = new CollectionsService({
+					schema: this.schema,
+					accountability: this.accountability,
+					knex: trx,
+				});
+
+				for (const collectionKey of collectionKeys) {
+					await service.updateOne(collectionKey, data, {
+						autoPurgeCache: false,
+						autoPurgeSystemCache: false,
+						bypassEmitAction: (params) => nestedActionEvents.push(params),
+					});
+				}
 			});
 
-			for (const collectionKey of collectionKeys) {
-				await service.updateOne(collectionKey, data, { autoPurgeCache: false });
+			return collectionKeys;
+		} finally {
+			if (shouldClearCache(this.cache, opts)) {
+				await this.cache.clear();
 			}
-		});
 
-		if (this.cache && env.CACHE_AUTO_PURGE && opts?.autoPurgeCache !== false) {
-			await this.cache.clear();
+			if (opts?.autoPurgeSystemCache !== false) {
+				await clearSystemCache({ autoPurgeCache: opts?.autoPurgeCache });
+			}
+
+			if (opts?.emitEvents !== false && nestedActionEvents.length > 0) {
+				const updatedSchema = await getSchema();
+
+				for (const nestedActionEvent of nestedActionEvents) {
+					nestedActionEvent.context.schema = updatedSchema;
+					emitter.emitAction(nestedActionEvent.event, nestedActionEvent.meta, nestedActionEvent.context);
+				}
+			}
 		}
-
-		if (this.schemaCache) {
-			await this.schemaCache.clear();
-		}
-
-		return collectionKeys;
 	}
 
 	/**
@@ -376,86 +575,134 @@ export class CollectionsService {
 	 */
 	async deleteOne(collectionKey: string, opts?: MutationOptions): Promise<string> {
 		if (this.accountability && this.accountability.admin !== true) {
-			throw new ForbiddenException();
+			throw new ForbiddenError();
 		}
 
-		const tablesInDatabase = Object.keys(this.schema.collections);
+		const nestedActionEvents: ActionEventParams[] = [];
 
-		if (tablesInDatabase.includes(collectionKey) === false) {
-			throw new ForbiddenException();
-		}
+		try {
+			const collections = await this.readByQuery();
 
-		await this.knex.transaction(async (trx) => {
-			const collectionItemsService = new ItemsService('directus_collections', {
-				knex: trx,
-				accountability: this.accountability,
-				schema: this.schema,
-			});
+			const collectionToBeDeleted = collections.find((collection) => collection.collection === collectionKey);
 
-			const fieldsService = new FieldsService({
-				knex: trx,
-				accountability: this.accountability,
-				schema: this.schema,
-			});
-
-			await trx('directus_fields').delete().where('collection', '=', collectionKey);
-			await trx('directus_presets').delete().where('collection', '=', collectionKey);
-
-			const revisionsToDelete = await trx.select('id').from('directus_revisions').where({ collection: collectionKey });
-
-			if (revisionsToDelete.length > 0) {
-				const keys = revisionsToDelete.map((record) => record.id);
-				await trx('directus_revisions').update({ parent: null }).whereIn('parent', keys);
+			if (!!collectionToBeDeleted === false) {
+				throw new ForbiddenError();
 			}
 
-			await trx('directus_revisions').delete().where('collection', '=', collectionKey);
-
-			await trx('directus_activity').delete().where('collection', '=', collectionKey);
-			await trx('directus_permissions').delete().where('collection', '=', collectionKey);
-			await trx('directus_relations').delete().where({ many_collection: collectionKey });
-
-			const relations = this.schema.relations.filter((relation) => {
-				return relation.collection === collectionKey || relation.related_collection === collectionKey;
-			});
-
-			for (const relation of relations) {
-				// Delete related o2m fields that point to current collection
-				if (relation.related_collection && relation.meta?.one_field) {
-					await fieldsService.deleteField(relation.related_collection, relation.meta.one_field);
+			await transaction(this.knex, async (trx) => {
+				if (collectionToBeDeleted!.schema) {
+					await trx.schema.dropTable(collectionKey);
 				}
 
-				// Delete related m2o fields that point to current collection
-				if (relation.related_collection === collectionKey) {
-					await fieldsService.deleteField(relation.collection, relation.field);
-				}
-			}
+				// Make sure this collection isn't used as a group in any other collections
+				await trx('directus_collections').update({ group: null }).where({ group: collectionKey });
 
-			const m2aRelationsThatIncludeThisCollection = this.schema.relations.filter((relation) => {
-				return relation.meta?.one_allowed_collections?.includes(collectionKey);
+				if (collectionToBeDeleted!.meta) {
+					const collectionsItemsService = new ItemsService('directus_collections', {
+						knex: trx,
+						accountability: this.accountability,
+						schema: this.schema,
+					});
+
+					await collectionsItemsService.deleteOne(collectionKey, {
+						bypassEmitAction: (params) =>
+							opts?.bypassEmitAction ? opts.bypassEmitAction(params) : nestedActionEvents.push(params),
+					});
+				}
+
+				if (collectionToBeDeleted!.schema) {
+					const fieldsService = new FieldsService({
+						knex: trx,
+						accountability: this.accountability,
+						schema: this.schema,
+					});
+
+					await trx('directus_fields').delete().where('collection', '=', collectionKey);
+					await trx('directus_presets').delete().where('collection', '=', collectionKey);
+
+					const revisionsToDelete = await trx
+						.select('id')
+						.from('directus_revisions')
+						.where({ collection: collectionKey });
+
+					if (revisionsToDelete.length > 0) {
+						const chunks = chunk(
+							revisionsToDelete.map((record) => record.id),
+							10000,
+						);
+
+						for (const keys of chunks) {
+							await trx('directus_revisions').update({ parent: null }).whereIn('parent', keys);
+						}
+					}
+
+					await trx('directus_revisions').delete().where('collection', '=', collectionKey);
+
+					await trx('directus_activity').delete().where('collection', '=', collectionKey);
+					await trx('directus_permissions').delete().where('collection', '=', collectionKey);
+					await trx('directus_relations').delete().where({ many_collection: collectionKey });
+
+					const relations = this.schema.relations.filter((relation) => {
+						return relation.collection === collectionKey || relation.related_collection === collectionKey;
+					});
+
+					for (const relation of relations) {
+						// Delete related o2m fields that point to current collection
+						if (relation.related_collection && relation.meta?.one_field) {
+							await fieldsService.deleteField(relation.related_collection, relation.meta.one_field, {
+								autoPurgeCache: false,
+								autoPurgeSystemCache: false,
+								bypassEmitAction: (params) =>
+									opts?.bypassEmitAction ? opts.bypassEmitAction(params) : nestedActionEvents.push(params),
+							});
+						}
+
+						// Delete related m2o fields that point to current collection
+						if (relation.related_collection === collectionKey) {
+							await fieldsService.deleteField(relation.collection, relation.field, {
+								autoPurgeCache: false,
+								autoPurgeSystemCache: false,
+								bypassEmitAction: (params) =>
+									opts?.bypassEmitAction ? opts.bypassEmitAction(params) : nestedActionEvents.push(params),
+							});
+						}
+					}
+
+					const a2oRelationsThatIncludeThisCollection = this.schema.relations.filter((relation) => {
+						return relation.meta?.one_allowed_collections?.includes(collectionKey);
+					});
+
+					for (const relation of a2oRelationsThatIncludeThisCollection) {
+						const newAllowedCollections = relation
+							.meta!.one_allowed_collections!.filter((collection) => collectionKey !== collection)
+							.join(',');
+
+						await trx('directus_relations')
+							.update({ one_allowed_collections: newAllowedCollections })
+							.where({ id: relation.meta!.id });
+					}
+				}
 			});
 
-			for (const relation of m2aRelationsThatIncludeThisCollection) {
-				const newAllowedCollections = relation
-					.meta!.one_allowed_collections!.filter((collection) => collectionKey !== collection)
-					.join(',');
-				await trx('directus_relations')
-					.update({ one_allowed_collections: newAllowedCollections })
-					.where({ id: relation.meta!.id });
+			return collectionKey;
+		} finally {
+			if (shouldClearCache(this.cache, opts)) {
+				await this.cache.clear();
 			}
 
-			await collectionItemsService.deleteOne(collectionKey);
-			await trx.schema.dropTable(collectionKey);
-		});
+			if (opts?.autoPurgeSystemCache !== false) {
+				await clearSystemCache({ autoPurgeCache: opts?.autoPurgeCache });
+			}
 
-		if (this.cache && env.CACHE_AUTO_PURGE && opts?.autoPurgeCache !== false) {
-			await this.cache.clear();
+			if (opts?.emitEvents !== false && nestedActionEvents.length > 0) {
+				const updatedSchema = await getSchema();
+
+				for (const nestedActionEvent of nestedActionEvents) {
+					nestedActionEvent.context.schema = updatedSchema;
+					emitter.emitAction(nestedActionEvent.event, nestedActionEvent.meta, nestedActionEvent.context);
+				}
+			}
 		}
-
-		if (this.schemaCache) {
-			await this.schemaCache.clear();
-		}
-
-		return collectionKey;
 	}
 
 	/**
@@ -463,84 +710,46 @@ export class CollectionsService {
 	 */
 	async deleteMany(collectionKeys: string[], opts?: MutationOptions): Promise<string[]> {
 		if (this.accountability && this.accountability.admin !== true) {
-			throw new ForbiddenException();
+			throw new ForbiddenError();
 		}
 
-		await this.knex.transaction(async (trx) => {
-			const service = new CollectionsService({
-				schema: this.schema,
-				accountability: this.accountability,
-				knex: trx,
+		const nestedActionEvents: ActionEventParams[] = [];
+
+		try {
+			await transaction(this.knex, async (trx) => {
+				const service = new CollectionsService({
+					schema: this.schema,
+					accountability: this.accountability,
+					knex: trx,
+				});
+
+				for (const collectionKey of collectionKeys) {
+					await service.deleteOne(collectionKey, {
+						autoPurgeCache: false,
+						autoPurgeSystemCache: false,
+						bypassEmitAction: (params) => nestedActionEvents.push(params),
+					});
+				}
 			});
 
-			for (const collectionKey of collectionKeys) {
-				await service.deleteOne(collectionKey, { autoPurgeCache: false });
+			return collectionKeys;
+		} finally {
+			if (shouldClearCache(this.cache, opts)) {
+				await this.cache.clear();
 			}
-		});
 
-		if (this.cache && env.CACHE_AUTO_PURGE && opts?.autoPurgeCache !== false) {
-			await this.cache.clear();
+			if (opts?.autoPurgeSystemCache !== false) {
+				await clearSystemCache({ autoPurgeCache: opts?.autoPurgeCache });
+			}
+
+			if (opts?.emitEvents !== false && nestedActionEvents.length > 0) {
+				const updatedSchema = await getSchema();
+
+				for (const nestedActionEvent of nestedActionEvents) {
+					nestedActionEvent.context.schema = updatedSchema;
+					emitter.emitAction(nestedActionEvent.event, nestedActionEvent.meta, nestedActionEvent.context);
+				}
+			}
 		}
-
-		if (this.schemaCache) {
-			await this.schemaCache.clear();
-		}
-
-		return collectionKeys;
-	}
-
-	/**
-	 * @deprecated Use `createOne` or `createMany` instead
-	 */
-	create(data: RawCollection[]): Promise<string[]>;
-	create(data: RawCollection): Promise<string>;
-	async create(data: RawCollection | RawCollection[]): Promise<string | string[]> {
-		logger.warn(
-			'CollectionsService.create is deprecated and will be removed before v9.0.0. Use createOne or createMany instead.'
-		);
-
-		if (Array.isArray(data)) {
-			return await this.createMany(data);
-		} else {
-			return await this.createOne(data);
-		}
-	}
-
-	/**
-	 * @deprecated Use `readOne` or `readMany` instead
-	 */
-	readByKey(collection: string[]): Promise<Collection[]>;
-	readByKey(collection: string): Promise<Collection>;
-	async readByKey(collection: string | string[]): Promise<Collection | Collection[]> {
-		logger.warn(
-			'CollectionsService.readByKey is deprecated and will be removed before v9.0.0. Use readOne or readMany instead.'
-		);
-
-		if (Array.isArray(collection)) return await this.readMany(collection);
-		return await this.readOne(collection);
-	}
-
-	/**
-	 * @deprecated Use `updateOne` or `updateMany` instead
-	 */
-	update(data: Partial<Collection>, keys: string[]): Promise<string[]>;
-	update(data: Partial<Collection>, key: string): Promise<string>;
-	async update(data: Partial<Collection>, key: string | string[]): Promise<string | string[]> {
-		if (Array.isArray(key)) return await this.updateMany(key, data);
-		return await this.updateOne(key, data);
-	}
-
-	/**
-	 * @deprecated Use `deleteOne` or `deleteMany` instead
-	 */
-	delete(collections: string[]): Promise<string[]>;
-	delete(collection: string): Promise<string>;
-	async delete(collection: string[] | string): Promise<string[] | string> {
-		logger.warn(
-			'CollectionsService.delete is deprecated and will be removed before v9.0.0. Use deleteOne or deleteMany instead.'
-		);
-
-		if (Array.isArray(collection)) return await this.deleteMany(collection);
-		return await this.deleteOne(collection);
 	}
 }

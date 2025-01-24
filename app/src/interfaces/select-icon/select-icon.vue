@@ -1,3 +1,55 @@
+<script setup lang="ts">
+import formatTitle from '@directus/format-title';
+import { computed, ref } from 'vue';
+import { useI18n } from 'vue-i18n';
+import icons from './icons.json';
+import { socialIcons } from '@/components/v-icon/social-icons';
+
+withDefaults(
+	defineProps<{
+		value: string | null;
+		disabled?: boolean;
+		width?: string;
+	}>(),
+	{
+		width: 'half',
+	},
+);
+
+const emit = defineEmits(['input']);
+
+const { t } = useI18n();
+
+const searchQuery = ref('');
+
+const mergedIcons = [
+	...icons,
+	{
+		name: 'Social',
+		icons: socialIcons,
+	},
+];
+
+const filteredIcons = computed(() => {
+	if (searchQuery.value.length === 0) return mergedIcons;
+
+	return mergedIcons.map((group) => {
+		const icons = group.icons.filter((icon) => icon.includes(searchQuery.value.toLowerCase()));
+
+		return {
+			name: group.name,
+			icons,
+		};
+	});
+});
+
+function setIcon(icon: string | null) {
+	searchQuery.value = '';
+
+	emit('input', icon);
+}
+</script>
+
 <template>
 	<v-menu attached :disabled="disabled">
 		<template #activator="{ active, activate }">
@@ -14,15 +66,18 @@
 				</template>
 
 				<template #append>
-					<v-icon v-if="value !== null" clickable name="close" @click="setIcon(null)" />
-					<v-icon
-						v-else
-						clickable
-						name="expand_more"
-						class="open-indicator"
-						:class="{ open: active }"
-						@click="activate"
-					/>
+					<div class="item-actions">
+						<v-icon v-if="value !== null" clickable name="close" @click="setIcon(null)" />
+
+						<v-icon
+							v-else
+							clickable
+							name="expand_more"
+							class="open-indicator"
+							:class="{ open: active }"
+							@click="activate"
+						/>
+					</div>
 				</template>
 			</v-input>
 		</template>
@@ -45,80 +100,32 @@
 	</v-menu>
 </template>
 
-<script lang="ts">
-import { useI18n } from 'vue-i18n';
-import icons from './icons.json';
-import { defineComponent, ref, computed } from 'vue';
-import formatTitle from '@directus/format-title';
-
-export default defineComponent({
-	props: {
-		value: {
-			type: String,
-			default: null,
-		},
-		disabled: {
-			type: Boolean,
-			default: false,
-		},
-		width: {
-			type: String,
-			default: 'half',
-		},
-	},
-	emits: ['input'],
-	setup(props, { emit }) {
-		const { t } = useI18n();
-
-		const searchQuery = ref('');
-
-		const filteredIcons = computed(() => {
-			return icons.map((group) => {
-				if (searchQuery.value.length === 0) return group;
-
-				const icons = group.icons.filter((icon) => icon.includes(searchQuery.value.toLowerCase()));
-
-				return {
-					...group,
-					icons: icons,
-					length: icons.length,
-				};
-			});
-		});
-
-		return { t, icons, setIcon, searchQuery, filteredIcons, formatTitle };
-
-		function setIcon(icon: string | null) {
-			searchQuery.value = '';
-
-			emit('input', icon);
-		}
-	},
-});
-</script>
-
 <style lang="scss" scoped>
+@use '@/styles/mixins';
+
+.item-actions {
+	@include mixins.list-interface-item-actions;
+}
+
 .v-input.has-value {
-	--v-input-placeholder-color: var(--primary);
+	--v-input-placeholder-color: var(--theme--primary);
 
 	&:focus-within {
-		--v-input-placeholder-color: var(--foreground-subdued);
+		--v-input-placeholder-color: var(--theme--form--field--input--foreground-subdued);
 	}
 }
 
 .content {
 	padding: 8px;
 
-	.v-icon:hover {
-		color: var(--foreground-normal);
-	}
+	--v-icon-color-hover: var(--theme--form--field--input--foreground);
 
 	.v-icon.active {
-		color: var(--primary);
+		color: var(--theme--primary);
 	}
 
 	.v-divider {
-		--v-divider-color: var(--background-normal);
+		--v-divider-color: var(--theme--background-normal);
 
 		margin: 0 22px;
 	}
@@ -128,8 +135,9 @@ export default defineComponent({
 	display: grid;
 	grid-gap: 8px;
 	grid-template-columns: repeat(auto-fit, 24px);
+	justify-content: center;
 	padding: 20px 0;
-	color: var(--foreground-subdued);
+	color: var(--theme--form--field--input--foreground-subdued);
 }
 
 .open-indicator {

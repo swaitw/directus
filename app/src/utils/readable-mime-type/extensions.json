@@ -3,6 +3,7 @@
 	"application/x-abiword": "abw",
 	"application/x-freearc": "arc",
 	"video/x-msvideo": "avi",
+	"image/avif": "avif",
 	"application/vnd.amazon.ebook": "azw",
 	"application/octet-stream": "file",
 	"image/bmp": "bmp",
@@ -29,6 +30,9 @@
 	"audio/midi audio/x-midi": "midi",
 	"audio/mpeg": "mp3",
 	"video/mpeg": "mpeg",
+	"audio/mp4": "mp4",
+	"video/mp4": "mp4",
+	"application/mp4": "mp4",
 	"application/vnd.apple.installer+xml": "mpkg",
 	"application/vnd.oasis.opendocument.presentation": "odp",
 	"application/vnd.oasis.opendocument.spreadsheet": "ods",
@@ -70,5 +74,7 @@
 	"video/3gpp2": "3g2",
 	"audio/3gpp": "3gp",
 	"audio/3gpp2": "3g2",
-	"application/x-7z-compressed": "7z"
+	"application/x-7z-compressed": "7z",
+	"image/heic": "heic",
+	"image/heif": "heif"
 }

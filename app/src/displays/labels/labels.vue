@@ -1,3 +1,75 @@
+<script setup lang="ts">
+import formatTitle from '@directus/format-title';
+import { isEmpty, isString } from 'lodash';
+import { computed } from 'vue';
+
+type Choice = {
+	value: string | number;
+	text: string;
+	icon?: string;
+	color?: string;
+	foreground: string | null;
+	background: string | null;
+};
+
+const props = withDefaults(
+	defineProps<{
+		value: string | number | string[] | number[];
+		type: 'text' | 'string' | 'json' | 'csv' | 'integer' | 'bigInteger' | 'float' | 'decimal';
+		format?: boolean;
+		showAsDot?: boolean;
+		choices?: Choice[];
+	}>(),
+	{
+		format: true,
+		choices: () => [],
+	},
+);
+
+const items = computed(() => {
+	let items: string[] | number[];
+
+	if (isEmpty(props.value) && isNaN(props.value as number)) items = [];
+	else if (['integer', 'bigInteger', 'float', 'decimal'].includes(props.type)) items = [props.value as number];
+	else if (isString(props.value)) items = [props.value as string];
+	else items = props.value as string[];
+
+	return items.map((item) => {
+		const choice = (props.choices || []).find((choice) => choice.value === item);
+
+		let itemStringValue: string;
+
+		if (typeof item === 'object') {
+			itemStringValue = JSON.stringify(item);
+		} else {
+			if (props.format && isNaN(item as any)) {
+				itemStringValue = formatTitle(item as string);
+			} else {
+				itemStringValue = item as string;
+			}
+		}
+
+		if (choice === undefined) {
+			return {
+				value: item,
+				text: itemStringValue,
+				foreground: 'var(--theme--foreground)',
+				background: 'var(--theme--background-normal)',
+			};
+		} else {
+			return {
+				value: item,
+				text: choice.text || itemStringValue,
+				icon: choice.icon,
+				color: choice.color,
+				foreground: choice.foreground || 'var(--theme--foreground)',
+				background: choice.background || 'var(--theme--background-normal)',
+			};
+		}
+	});
+});
+</script>
+
 <template>
 	<div class="display-labels">
 		<template v-if="!showAsDot">
@@ -11,7 +83,10 @@
 				small
 				disabled
 				label
+				:class="{ 'has-icon': !!item.icon || !!item.color }"
 			>
+				<v-icon v-if="item.icon" :name="item.icon" :color="item.color" left small />
+				<display-color v-else-if="item.color" class="inline-dot" :value="item.color" />
 				{{ item.text }}
 			</v-chip>
 		</template>
@@ -20,109 +95,32 @@
 				v-for="item in items"
 				:key="item.value"
 				v-tooltip="item.text"
-				:value="item.background"
-				:default-color="defaultBackground"
+				:value="item.color ?? item.background"
 			/>
 		</template>
 	</div>
 </template>
-
-<script lang="ts">
-import { defineComponent, computed, PropType } from 'vue';
-import formatTitle from '@directus/format-title';
-import { translate } from '@/utils/translate-object-values';
-
-type Choice = {
-	value: string;
-	text: string;
-	foreground: string | null;
-	background: string | null;
-};
-
-export default defineComponent({
-	props: {
-		value: {
-			type: [String, Array] as PropType<string | string[]>,
-			required: true,
-		},
-		format: {
-			type: Boolean,
-			default: true,
-		},
-		showAsDot: {
-			type: Boolean,
-			default: false,
-		},
-		choices: {
-			type: Array as PropType<Choice[]>,
-			default: () => [],
-		},
-		defaultBackground: {
-			type: String,
-			default: '#eceff1',
-		},
-		defaultForeground: {
-			type: String,
-			default: '#263238',
-		},
-		type: {
-			type: String,
-			required: true,
-			validator: (val: string) => ['text', 'string', 'json', 'csv'].includes(val),
-		},
-	},
-	setup(props) {
-		const items = computed(() => {
-			let items: string[];
-
-			if (props.value === null) items = [];
-			else if (props.type === 'string') items = [props.value as string];
-			else items = props.value as string[];
-
-			return items.map((item) => {
-				const choice = (props.choices || []).find((choice) => choice.value === item);
-
-				let itemStringValue: string;
-
-				if (typeof item === 'object') {
-					itemStringValue = JSON.stringify(item);
-				} else {
-					if (props.format) {
-						itemStringValue = formatTitle(item);
-					} else {
-						itemStringValue = item;
-					}
-				}
-
-				if (choice === undefined) {
-					return {
-						value: item,
-						text: itemStringValue,
-						foreground: props.defaultForeground,
-						background: props.defaultBackground,
-					};
-				} else {
-					return translate({
-						value: item,
-						text: choice.text || itemStringValue,
-						foreground: choice.foreground || props.defaultForeground,
-						background: choice.background || props.defaultBackground,
-					});
-				}
-			});
-		});
-
-		return { items };
-	},
-});
-</script>
 
 <style lang="scss" scoped>
 .display-labels {
 	display: inline-flex;
 }
 
+.has-icon {
+	--v-chip-padding: 0 8px 0 4px;
+}
+
 .v-chip + .v-chip {
 	margin-left: 4px;
+}
+
+.v-icon {
+	flex-shrink: 0;
+	vertical-align: -3px;
+}
+
+.inline-dot {
+	padding: 0 4px;
+	margin-right: 4px;
 }
 </style>

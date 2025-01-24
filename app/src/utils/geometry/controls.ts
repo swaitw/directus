@@ -4,28 +4,36 @@ export class ButtonControl {
 	active: boolean;
 	element: HTMLElement;
 	groupElement?: HTMLElement;
-	constructor(private className: string, private callback: (...args: any) => any) {
+	constructor(
+		private className: string,
+		private callback: (...args: any) => any,
+	) {
 		this.element = document.createElement('button');
 		this.element.className = this.className;
-		this.element.onclick = callback;
+		this.element.onpointerdown = callback;
 		this.active = false;
 	}
+
 	click(...args: any[]): void {
 		this.callback(...args);
 	}
+
 	activate(yes: boolean): void {
 		this.element.classList[yes ? 'add' : 'remove']('active');
 		this.active = yes;
 	}
+
 	show(yes: boolean): void {
 		this.element.classList[yes ? 'remove' : 'add']('hidden');
 	}
+
 	onAdd(): HTMLElement {
 		this.groupElement = document.createElement('div');
 		this.groupElement.className = 'mapboxgl-ctrl mapboxgl-ctrl-group';
 		this.groupElement.appendChild(this.element);
 		return this.groupElement;
 	}
+
 	onRemove(): void {
 		this.element.remove();
 		this.groupElement?.remove();
@@ -36,7 +44,6 @@ type BoxSelectControlOptions = {
 	groupElementClass?: string;
 	boxElementClass?: string;
 	selectButtonClass?: string;
-	unselectButtonClass?: string;
 	layers: string[];
 };
 
@@ -45,7 +52,6 @@ export class BoxSelectControl {
 	boxElement: HTMLElement;
 
 	selectButton: ButtonControl;
-	unselectButton: ButtonControl;
 
 	map?: Map & { fire: (event: string, data?: any) => void };
 	layers: string[];
@@ -67,16 +73,12 @@ export class BoxSelectControl {
 		this.boxElement.className = options?.boxElementClass ?? 'selection-box';
 		this.groupElement = document.createElement('div');
 		this.groupElement.className = options?.groupElementClass ?? 'mapboxgl-ctrl mapboxgl-ctrl-group';
+
 		this.selectButton = new ButtonControl(options?.selectButtonClass ?? 'ctrl-select', () => {
 			this.activate(!this.shiftPressed);
 		});
-		this.unselectButton = new ButtonControl(options?.unselectButtonClass ?? 'ctrl-unselect', () => {
-			this.reset();
-			this.activate(false);
-			this.map!.fire('select.end', { features: [] });
-		});
+
 		this.groupElement.appendChild(this.selectButton.element);
-		this.groupElement.appendChild(this.unselectButton.element);
 
 		this.onKeyDownHandler = this.onKeyDown.bind(this);
 		this.onKeyUpHandler = this.onKeyUp.bind(this);
@@ -113,16 +115,13 @@ export class BoxSelectControl {
 		const rect = container.getBoundingClientRect();
 		// @ts-ignore
 		return new Point(event.clientX - rect.left - container.clientLeft, event.clientY - rect.top - container.clientTop);
-		// return {
-		// 	x: event.clientX - rect.left - container.clientLeft,
-		// 	y: event.clientY - rect.top - container.clientTop
-		// };
 	}
 
 	onKeyDown(event: KeyboardEvent): void {
 		if (event.key == 'Shift') {
 			this.activate(true);
 		}
+
 		if (event.key == 'Escape') {
 			this.reset();
 			this.activate(false);
@@ -146,6 +145,7 @@ export class BoxSelectControl {
 		if (!this.shiftPressed) {
 			return;
 		}
+
 		if (event.button === 0) {
 			this.selecting = true;
 			this.map!.dragPan.disable();
@@ -159,10 +159,12 @@ export class BoxSelectControl {
 
 	onMouseMove(event: MouseEvent): void {
 		this.lastPos = this.getMousePosition(event);
+
 		const minX = Math.min(this.startPos!.x, this.lastPos!.x),
 			maxX = Math.max(this.startPos!.x, this.lastPos!.x),
 			minY = Math.min(this.startPos!.y, this.lastPos!.y),
 			maxY = Math.max(this.startPos!.y, this.lastPos!.y);
+
 		const transform = `translate(${minX}px, ${minY}px)`;
 		const width = maxX - minX + 'px';
 		const height = maxY - minY + 'px';
@@ -171,9 +173,15 @@ export class BoxSelectControl {
 
 	onMouseUp(event: MouseEvent): void {
 		this.reset();
+
+		if (!this.active()) {
+			return;
+		}
+
 		const features = this.map!.queryRenderedFeatures([this.startPos!, this.lastPos!], {
 			layers: this.layers,
 		});
+
 		this.map!.fire('select.end', { features, alt: event.altKey });
 	}
 

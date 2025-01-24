@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 'use strict';
 
-const inquirer = require('inquirer');
-const { EXTENSION_TYPES, EXTENSION_LANGUAGES } = require('@directus/shared/constants');
-const { create } = require('@directus/extensions-sdk/cli');
+import inquirer from 'inquirer';
+import { EXTENSION_LANGUAGES, EXTENSION_TYPES, BUNDLE_EXTENSION_TYPES } from '@directus/extensions';
+import { create } from '@directus/extensions-sdk/cli';
 
 run();
 
@@ -11,7 +11,7 @@ async function run() {
 	// eslint-disable-next-line no-console
 	console.log('This utility will walk you through creating a Directus extension.\n');
 
-	const { type, name, language } = await inquirer.prompt([
+	const { type, name, language, install } = await inquirer.prompt([
 		{
 			type: 'list',
 			name: 'type',
@@ -28,8 +28,15 @@ async function run() {
 			name: 'language',
 			message: 'Choose the language to use',
 			choices: EXTENSION_LANGUAGES,
+			when: ({ type }) => BUNDLE_EXTENSION_TYPES.includes(type) === false,
+		},
+		{
+			type: 'confirm',
+			name: 'install',
+			message: 'Auto install dependencies?',
+			default: true,
 		},
 	]);
 
-	await create(type, name, { language });
+	await create(type, name, { language, install });
 }

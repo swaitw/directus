@@ -1,4 +1,5 @@
-import { defineInterface } from '@directus/shared/utils';
+import { defineInterface } from '@directus/extensions';
+import PreviewSVG from './preview.svg?raw';
 import InterfaceSelectDropdown from './select-dropdown.vue';
 
 export default defineInterface({
@@ -7,8 +8,10 @@ export default defineInterface({
 	description: '$t:interfaces.select-dropdown.description',
 	icon: 'arrow_drop_down_circle',
 	component: InterfaceSelectDropdown,
-	types: ['string'],
-	options: [
+	types: ['string', 'integer', 'float', 'decimal', 'bigInteger'],
+	group: 'selection',
+	preview: PreviewSVG,
+	options: ({ field }) => [
 		{
 			field: 'choices',
 			type: 'json',
@@ -25,7 +28,8 @@ export default defineInterface({
 							type: 'string',
 							name: '$t:text',
 							meta: {
-								interface: 'input',
+								interface: 'system-input-translated-string',
+								required: true,
 								width: 'half',
 								options: {
 									placeholder: '$t:interfaces.select-dropdown.choices_name_placeholder',
@@ -34,7 +38,7 @@ export default defineInterface({
 						},
 						{
 							field: 'value',
-							type: 'string',
+							type: field.type,
 							name: '$t:value',
 							meta: {
 								interface: 'input',
@@ -42,6 +46,25 @@ export default defineInterface({
 									font: 'monospace',
 									placeholder: '$t:interfaces.select-dropdown.choices_value_placeholder',
 								},
+								required: true,
+								width: 'half',
+							},
+						},
+						{
+							field: 'icon',
+							name: '$t:icon',
+							type: 'string',
+							meta: {
+								interface: 'select-icon',
+								width: 'half',
+							},
+						},
+						{
+							field: 'color',
+							name: '$t:color',
+							type: 'string',
+							meta: {
+								interface: 'select-color',
 								width: 'half',
 							},
 						},
@@ -94,7 +117,7 @@ export default defineInterface({
 			type: 'string',
 			meta: {
 				width: 'half',
-				interface: 'input',
+				interface: 'system-input-translated-string',
 				options: {
 					placeholder: '$t:enter_a_placeholder',
 				},

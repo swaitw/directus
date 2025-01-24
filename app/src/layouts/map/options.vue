@@ -1,3 +1,38 @@
+<script setup lang="ts">
+import { getBasemapSources } from '@/utils/geometry/basemap';
+import { useSync } from '@directus/composables';
+import { useAppStore } from '@directus/stores';
+import { GeometryOptions, Item } from '@directus/types';
+import { toRefs } from 'vue';
+import { useI18n } from 'vue-i18n';
+
+const props = defineProps<{
+	collection: string;
+	geometryFields: Item[];
+	geometryField?: string;
+	geometryOptions?: GeometryOptions;
+	clusterData?: boolean;
+	displayTemplate?: string;
+}>();
+
+const emit = defineEmits<{
+	(e: 'update:geometryField', geometryField: string): void;
+	(e: 'update:clusterData', clusterData: boolean): void;
+	(e: 'update:displayTemplate', displayTemplate: string): void;
+}>();
+
+const { t } = useI18n();
+
+const appStore = useAppStore();
+
+const geometryFieldWritable = useSync(props, 'geometryField', emit);
+const clusterDataWritable = useSync(props, 'clusterData', emit);
+const displayTemplateWritable = useSync(props, 'displayTemplate', emit);
+
+const basemaps = getBasemapSources();
+const { basemap } = toRefs(appStore);
+</script>
+
 <template>
 	<div class="field">
 		<div class="type-label">{{ t('layouts.map.basemap') }}</div>
@@ -6,7 +41,7 @@
 
 	<template v-if="geometryFields.length == 0">
 		<div class="field">
-			<v-input type="text" disabled :prefix="'No compatible fields'"></v-input>
+			<v-input type="text" disabled :prefix="t('layouts.map.no_compatible_fields')"></v-input>
 		</div>
 	</template>
 	<template v-else>
@@ -20,10 +55,11 @@
 	</template>
 
 	<div class="field">
-		<v-checkbox
-			v-model="autoLocationFilterWritable"
-			:label="t('layouts.map.auto_location_filter')"
-			:disabled="geometryOptions && geometryOptions.geometryFormat !== 'native'"
+		<div class="type-label">{{ t('display_template') }}</div>
+		<v-collection-field-template
+			v-model="displayTemplateWritable"
+			:collection="collection"
+			:placeholder="t('layouts.map.default_template')"
 		/>
 	</div>
 
@@ -35,87 +71,3 @@
 		/>
 	</div>
 </template>
-
-<script lang="ts">
-import { useI18n } from 'vue-i18n';
-import { defineComponent, PropType, toRefs } from 'vue';
-
-import { useAppStore } from '@/stores';
-import { getBasemapSources } from '@/utils/geometry/basemap';
-import { GeometryOptions, Item } from '@directus/shared/types';
-import { useSync } from '@directus/shared/composables';
-
-export default defineComponent({
-	inheritAttrs: false,
-	props: {
-		geometryFields: {
-			type: Array as PropType<Item[]>,
-			required: true,
-		},
-		geometryField: {
-			type: String,
-			default: undefined,
-		},
-		autoLocationFilter: {
-			type: Boolean,
-			default: undefined,
-		},
-		geometryOptions: {
-			type: Object as PropType<GeometryOptions>,
-			default: undefined,
-		},
-		clusterData: {
-			type: Boolean,
-			default: undefined,
-		},
-		customLayerDrawerOpen: {
-			type: Boolean,
-			required: true,
-		},
-		resetLayers: {
-			type: Function as PropType<() => void>,
-			required: true,
-		},
-		updateLayers: {
-			type: Function as PropType<() => void>,
-			required: true,
-		},
-		customLayers: {
-			type: Array as PropType<any[]>,
-			default: undefined,
-		},
-	},
-	emits: [
-		'update:geometryField',
-		'update:autoLocationFilter',
-		'update:clusterData',
-		'update:customLayerDrawerOpen',
-		'update:customLayers',
-	],
-	setup(props, { emit }) {
-		const { t } = useI18n();
-
-		const appStore = useAppStore();
-
-		const geometryFieldWritable = useSync(props, 'geometryField', emit);
-		const autoLocationFilterWritable = useSync(props, 'autoLocationFilter', emit);
-		const clusterDataWritable = useSync(props, 'clusterData', emit);
-		const customLayerDrawerOpenWritable = useSync(props, 'customLayerDrawerOpen', emit);
-		const customLayersWritable = useSync(props, 'customLayers', emit);
-
-		const basemaps = getBasemapSources();
-		const { basemap } = toRefs(appStore);
-
-		return {
-			t,
-			geometryFieldWritable,
-			autoLocationFilterWritable,
-			clusterDataWritable,
-			customLayerDrawerOpenWritable,
-			customLayersWritable,
-			basemaps,
-			basemap,
-		};
-	},
-});
-</script>

@@ -1,6 +1,10 @@
-import { render, renderFn, get } from 'micromustache';
-import { computed, ComputedRef, Ref, unref } from 'vue';
-import { getFieldsFromTemplate } from '@directus/shared/utils';
+import { useExtension } from '@/composables/use-extension';
+import { useFieldsStore } from '@/stores/fields';
+import { Field } from '@directus/types';
+import { get, getFieldsFromTemplate } from '@directus/utils';
+import { set } from 'lodash';
+import { render, renderFn } from 'micromustache';
+import { ComputedRef, Ref, computed, unref } from 'vue';
 
 type StringTemplate = {
 	fieldsInTemplate: ComputedRef<string[]>;
@@ -14,7 +18,7 @@ function resolve(path: string, scope: any) {
 
 export function renderStringTemplate(
 	template: Ref<string | null> | string,
-	item: Record<string, any> | undefined | null | Ref<Record<string, any> | undefined | null>
+	item: Record<string, any> | undefined | null | Ref<Record<string, any> | undefined | null>,
 ): StringTemplate {
 	const values = unref(item);
 
@@ -45,4 +49,49 @@ export function renderPlainStringTemplate(template: string, item?: Record<string
 	} catch {
 		return null;
 	}
+}
+
+export function renderDisplayStringTemplate(
+	collection: string,
+	template: string,
+	item: Record<string, any>,
+): string | null {
+	const fieldsStore = useFieldsStore();
+
+	const fields = getFieldsFromTemplate(template);
+
+	const fieldsUsed: Record<string, Field | null> = {};
+
+	for (const key of fields) {
+		set(fieldsUsed, key, fieldsStore.getField(collection, key));
+	}
+
+	const parsedItem: Record<string, any> = {};
+
+	for (const key of fields) {
+		const value = get(item, key);
+
+		const display = useExtension(
+			'display',
+			computed(() => fieldsUsed[key]?.meta?.display ?? null),
+		);
+
+		if (value !== undefined && value !== null) {
+			set(
+				parsedItem,
+				key,
+				display.value?.handler
+					? display.value.handler(value, fieldsUsed[key]?.meta?.display_options ?? {}, {
+							interfaceOptions: fieldsUsed[key]?.meta?.options ?? {},
+							field: fieldsUsed[key] ?? undefined,
+							collection: collection,
+					  })
+					: value,
+			);
+		} else {
+			set(parsedItem, key, value);
+		}
+	}
+
+	return renderPlainStringTemplate(template, parsedItem);
 }

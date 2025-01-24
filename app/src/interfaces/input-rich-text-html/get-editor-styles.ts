@@ -1,14 +1,31 @@
-function cssVar(name: string) {
-	return getComputedStyle(document.body).getPropertyValue(name);
-}
+import firaMono from '../../assets/fonts/FiraMono-Medium.woff2';
+import merriweatherRegular from '../../assets/fonts/merriweather-regular.woff2';
+import { cssVar } from '@directus/utils/browser';
 
 export default function getEditorStyles(font: 'sans-serif' | 'serif' | 'monospace'): string {
+	const userFontFamily = cssVar(`--theme--fonts--${font}--font-family`);
+
 	return `
+@font-face {
+	font-family: 'Fira Mono';
+	font-style: normal;
+	src: url(${firaMono}) format('woff2');
+}
+
+@font-face {
+	font-family: 'Merriweather';
+	font-style: normal;
+	src: url(${merriweatherRegular}) format('woff2');
+}
+
+::selection {
+	background: ${cssVar('--background-normal-alt')};
+}
 body {
-	color: ${cssVar('--foreground-normal')};
-	background-color: ${cssVar('--background-input')};
+	color: ${cssVar('--theme--form--field--input--foreground')};
+	background-color: ${cssVar('--theme--form--field--input--background')};
 	margin: 20px;
-	font-family: ${cssVar('--family-sans-serif')};
+	font-family: ${cssVar('--theme--fonts--sans--font-family')};
 	-webkit-font-smoothing: antialiased;
 	text-rendering: optimizeLegibility;
 	-moz-osx-font-smoothing: grayscale;
@@ -17,9 +34,12 @@ body.mce-content-readonly {
 	color: ${cssVar('--foreground-subdued')};
 	background-color: ${cssVar('--background-subdued')};
 }
+.mce-offscreen-selection {
+	display: none;
+}
 h1, h2, h3, h4, h5, h6 {
-	font-family: ${cssVar(`--family-${font}`)}, serif;
-	color: ${cssVar('--foreground-normal-alt')};
+	font-family: ${userFontFamily}, serif;
+	color: ${cssVar('--theme--form--field--input--foreground-accent')};
 	font-weight: 700;
 	margin-bottom: 0;
 }
@@ -57,18 +77,18 @@ h6 {
 	margin-top: 2em;
 }
 p {
-	font-family: ${cssVar(`--family-${font}`)}, serif;
+	font-family: ${userFontFamily}, serif;
 	font-size: 15px;
 	line-height: 24px;
 	font-weight: 500;
 	margin: 1.5em 0;
 }
 a {
-	color: ${cssVar('--primary-125')};
+	color: ${cssVar('--theme--primary-accent')};
 	text-decoration: none;
 }
 ul, ol {
-	font-family: ${cssVar(`--family-${font}`)}, serif;
+	font-family: ${userFontFamily}, serif;
 	font-size: 15px;
 	line-height: 24px;
 	font-weight: 500;
@@ -88,9 +108,9 @@ code {
 	line-height: 24px;
 	font-weight: 500;
 	padding: 2px 4px;
-	font-family: ${cssVar('--family-monospace')}, monospace;
-	background-color: ${cssVar('--background-normal')};
-	border-radius: ${cssVar('--border-radius')};
+	font-family: ${cssVar('--theme--fonts--monospace--font-family')}, monospace;
+	background-color: ${cssVar('--theme--background-accent')};
+	border-radius: ${cssVar('--theme--border-radius')};
 	overflow-wrap: break-word;
 }
 pre {
@@ -98,29 +118,32 @@ pre {
 	line-height: 24px;
 	font-weight: 500;
 	padding: 1em;
-	font-family: ${cssVar('--family-monospace')}, monospace;
-	background-color: ${cssVar('--background-normal')};
-	border-radius: ${cssVar('--border-radius')};
+	font-family: ${cssVar('--theme--fonts--monospace--font-family')}, monospace;
+	background-color: ${cssVar('--theme--background-accent')};
+	border-radius: ${cssVar('--theme--border-radius')};
 	overflow: auto;
 }
 blockquote {
-	font-family: ${cssVar(`--family-${font}`)}, serif;
+	font-family: ${userFontFamily}, serif;
 	font-size: 15px;
 	line-height: 24px;
 	font-weight: 500;
-	border-left: 2px solid ${cssVar('--border-normal')};
+	border-left: 2px solid ${cssVar('--theme--form--field--input--border-color')};
 	padding-left: 1em;
 	margin-left: 0px;
 }
 video,
-iframe,
 img {
 	max-width: 100%;
-	border-radius: ${cssVar('--border-radius')};
+	border-radius: ${cssVar('--theme--border-radius')};
 	height: auto;
 }
+iframe {
+	max-width: 100%;
+	border-radius: ${cssVar('--theme--border-radius')};
+}
 hr {
-	background-color: ${cssVar('--border-normal')};
+	background-color: ${cssVar('--theme--form--field--input--border-color')};
 	height: 1px;
 	border: none;
 	margin-top: 2em;
@@ -134,7 +157,7 @@ table {
 }
 table th,
 table td {
-	border: 1px solid ${cssVar('--border-normal')};
+	border: 1px solid ${cssVar('--theme--form--field--input--border-color')};
 	padding: 0.4rem;
 }
 figure {

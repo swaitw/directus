@@ -1,17 +1,7 @@
 {
+	"extends": "@directus/tsconfig/node22",
 	"compilerOptions": {
-		"module": "commonjs",
-		"esModuleInterop": true,
-		"target": "ES2019",
-		"moduleResolution": "node",
-		"sourceMap": false,
-		"outDir": "dist",
-		"rootDir": "src",
-		"strict": true,
-		"lib": ["es2019"],
-		"skipLibCheck": true,
-		"declaration": true,
-		"resolveJsonModule": true
+		"outDir": "dist"
 	},
-	"exclude": ["node_modules", "dist"]
+	"include": ["src"]
 }

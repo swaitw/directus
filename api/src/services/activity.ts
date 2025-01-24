@@ -1,9 +1,5 @@
-import { AbstractServiceOptions } from '../types';
-import { ItemsService } from './items';
-
-/**
- * @TODO only return activity of the collections you have access to
- */
+import type { AbstractServiceOptions } from '../types/index.js';
+import { ItemsService } from './items.js';
 
 export class ActivityService extends ItemsService {
 	constructor(options: AbstractServiceOptions) {

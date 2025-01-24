@@ -1,24 +1,55 @@
-# Translating the App
+---
+description:
+  Directus supports internationalization across the entire App. Many languages are currently supported, with more being
+  added all the time.
+readTime: 2 min read
+---
 
-> Directus is maintained by a global community of contributors who speak many different languages. For that reason, the
-> App itself also supports multiple languages.
+# App Translations
 
-The Directus App has been translated into many different languages, and it's easy to add or improve the languages of
-your choice.
+> The platform supports internationalization across the entire App. Many languages are currently supported, with more
+> being added all the time. Anyone can add or refine any languages through the integration with Crowdin.
 
-1. Navigate to our translation service at: [https://locales.directus.io](https://locales.directus.io)
-2. **Check** if your desired language is listed
-   - If not, contact the Core Team on our [Community Chat](https://directus.chat) to request it
-3. **Click the desired language**
-4. Click the **"Translate All"** button in the header
-5. **Log in to Crowdin**, or register an account as needed
-6. **Click on the strings** to translate in the left sidebar
-7. **Type translations**, or select an ideal match from the list of recommendations
-8. Click **"Save"**
+## Crowdin
 
-::: tip Missing Context
+Our [Crowdin](https://locales.directus.io) page provides an external interface for managing all of the different
+language translations for the App. You can update and extend existing languages, or request a new language be added.
 
-If a translation string is missing enough context to understand its usage, Crowdin allows you to request additional
-context.
+## Working with Existing Languages
+
+1. Navigate to [Crowdin](https://locales.directus.io)
+2. Click on the desired language
+3. Click **Translate All** in the header
+4. Log in to Crowdin, or register an account as needed
+5. Select a source string using the left-hand navigation
+6. Add or edit the translation in the lower text area
+7. Click "SAVE" below the translation
+
+It is important to keep the character length approximately the same as the source string (English) to avoid truncation
+or a drastically different wrapping. For example, some text translations will go in a smaller button with limited space
+for text and no ability to wrap.
+
+Crowdin provides useful TM and MT suggestions, however you should always confirm that these are context appropriate, as
+they may not accurately map to the source meaning.
+
+If you feel you do not have enough information on how this string is used, you can always ask for additional context
+using the "Comment" section.
+
+## Releasing New Translations
+
+As soon as a translation is edited on Crowdin, a pull request is created by Crowdin in our repo, which contains the
+corresponding changes.
+
+This pull request is usually merged into main before publishing a new release.
+
+::: warning Translations on GitHub
+
+Editing translations directly in the GitHub repo is not recommended, as these changes will be overwritten by Crowdin
+again (unless we do a manual sync).
 
 :::
+
+## Requesting a New Language
+
+To add a new language to the Crowdin service, you can make a request via Crowdin's **Discussions** section, or reach out
+to a Core Team member via [Discord](https://directus.chat).

@@ -1,26 +1,32 @@
+import { useEnv } from '@directus/env';
+import { ErrorCode, InvalidPayloadError, isDirectusError } from '@directus/errors';
+import type { Accountability } from '@directus/types';
+import type { Request } from 'express';
 import { Router } from 'express';
-import grant from 'grant';
-import ms from 'ms';
-import emitter, { emitAsyncSafe } from '../emitter';
-import env from '../env';
 import {
-	InvalidCredentialsException,
-	RouteNotFoundException,
-	ServiceUnavailableException,
-	InvalidPayloadException,
-} from '../exceptions';
-import grantConfig from '../grant';
-import { respond } from '../middleware/respond';
-import { AuthenticationService, UsersService } from '../services';
-import asyncHandler from '../utils/async-handler';
-import { getAuthProviders } from '../utils/get-auth-providers';
-import getEmailFromProfile from '../utils/get-email-from-profile';
-import { toArray } from '@directus/shared/utils';
-import logger from '../logger';
-import { createLocalAuthRouter } from '../auth/drivers';
-import { DEFAULT_AUTH_PROVIDER } from '../constants';
+	createLDAPAuthRouter,
+	createLocalAuthRouter,
+	createOAuth2AuthRouter,
+	createOpenIDAuthRouter,
+	createSAMLAuthRouter,
+} from '../auth/drivers/index.js';
+import { DEFAULT_AUTH_PROVIDER, REFRESH_COOKIE_OPTIONS, SESSION_COOKIE_OPTIONS } from '../constants.js';
+import { useLogger } from '../logger/index.js';
+import { respond } from '../middleware/respond.js';
+import { createDefaultAccountability } from '../permissions/utils/create-default-accountability.js';
+import { AuthenticationService } from '../services/authentication.js';
+import { UsersService } from '../services/users.js';
+import type { AuthenticationMode } from '../types/auth.js';
+import asyncHandler from '../utils/async-handler.js';
+import { getAuthProviders } from '../utils/get-auth-providers.js';
+import { getIPFromReq } from '../utils/get-ip-from-req.js';
+import { getSecret } from '../utils/get-secret.js';
+import isDirectusJWT from '../utils/is-directus-jwt.js';
+import { verifyAccessJWT } from '../utils/jwt.js';
 
 const router = Router();
+const env = useEnv();
+const logger = useLogger();
 
 const authProviders = getAuthProviders();
 
@@ -30,6 +36,23 @@ for (const authProvider of authProviders) {
 	switch (authProvider.driver) {
 		case 'local':
 			authRouter = createLocalAuthRouter(authProvider.name);
+			break;
+
+		case 'oauth2':
+			authRouter = createOAuth2AuthRouter(authProvider.name);
+			break;
+
+		case 'openid':
+			authRouter = createOpenIDAuthRouter(authProvider.name);
+			break;
+
+		case 'ldap':
+			authRouter = createLDAPAuthRouter(authProvider.name);
+			break;
+
+		case 'saml':
+			authRouter = createSAMLAuthRouter(authProvider.name);
+			break;
 	}
 
 	if (!authRouter) {
@@ -40,104 +63,148 @@ for (const authProvider of authProviders) {
 	router.use(`/login/${authProvider.name}`, authRouter);
 }
 
-router.use('/login', createLocalAuthRouter(DEFAULT_AUTH_PROVIDER));
+if (!env['AUTH_DISABLE_DEFAULT']) {
+	router.use('/login', createLocalAuthRouter(DEFAULT_AUTH_PROVIDER));
+}
+
+function getCurrentMode(req: Request): AuthenticationMode {
+	if (req.body.mode) {
+		return req.body.mode as AuthenticationMode;
+	}
+
+	if (req.body.refresh_token) {
+		return 'json';
+	}
+
+	return 'cookie';
+}
+
+function getCurrentRefreshToken(req: Request, mode: AuthenticationMode): string | undefined {
+	if (mode === 'json') {
+		return req.body.refresh_token;
+	}
+
+	if (mode === 'cookie') {
+		return req.cookies[env['REFRESH_TOKEN_COOKIE_NAME'] as string];
+	}
+
+	if (mode === 'session') {
+		const token = req.cookies[env['SESSION_COOKIE_NAME'] as string];
+
+		if (isDirectusJWT(token)) {
+			const payload = verifyAccessJWT(token, getSecret());
+			return payload.session;
+		}
+	}
+
+	return undefined;
+}
 
 router.post(
 	'/refresh',
 	asyncHandler(async (req, res, next) => {
-		const accountability = {
-			ip: req.ip,
-			userAgent: req.get('user-agent'),
-			role: null,
-		};
+		const accountability: Accountability = createDefaultAccountability({ ip: getIPFromReq(req) });
+
+		const userAgent = req.get('user-agent')?.substring(0, 1024);
+		if (userAgent) accountability.userAgent = userAgent;
+
+		const origin = req.get('origin');
+		if (origin) accountability.origin = origin;
 
 		const authenticationService = new AuthenticationService({
 			accountability: accountability,
 			schema: req.schema,
 		});
 
-		const currentRefreshToken = req.body.refresh_token || req.cookies[env.REFRESH_TOKEN_COOKIE_NAME];
+		const mode = getCurrentMode(req);
+		const currentRefreshToken = getCurrentRefreshToken(req, mode);
 
 		if (!currentRefreshToken) {
-			throw new InvalidPayloadException(`"refresh_token" is required in either the JSON payload or Cookie`);
-		}
-
-		const mode: 'json' | 'cookie' = req.body.mode || (req.body.refresh_token ? 'json' : 'cookie');
-
-		const { accessToken, refreshToken, expires } = await authenticationService.refresh(currentRefreshToken);
-
-		const payload = {
-			data: { access_token: accessToken, expires },
-		} as Record<string, Record<string, any>>;
-
-		if (mode === 'json') {
-			payload.data.refresh_token = refreshToken;
-		}
-
-		if (mode === 'cookie') {
-			res.cookie(env.REFRESH_TOKEN_COOKIE_NAME, refreshToken, {
-				httpOnly: true,
-				domain: env.REFRESH_TOKEN_COOKIE_DOMAIN,
-				maxAge: ms(env.REFRESH_TOKEN_TTL as string),
-				secure: env.REFRESH_TOKEN_COOKIE_SECURE ?? false,
-				sameSite: (env.REFRESH_TOKEN_COOKIE_SAME_SITE as 'lax' | 'strict' | 'none') || 'strict',
+			throw new InvalidPayloadError({
+				reason: `The refresh token is required in either the payload or cookie`,
 			});
 		}
 
-		res.locals.payload = payload;
+		const { accessToken, refreshToken, expires } = await authenticationService.refresh(currentRefreshToken, {
+			session: mode === 'session',
+		});
+
+		const payload = { expires } as { expires: number; access_token?: string; refresh_token?: string };
+
+		if (mode === 'json') {
+			payload.refresh_token = refreshToken;
+			payload.access_token = accessToken;
+		}
+
+		if (mode === 'cookie') {
+			res.cookie(env['REFRESH_TOKEN_COOKIE_NAME'] as string, refreshToken, REFRESH_COOKIE_OPTIONS);
+			payload.access_token = accessToken;
+		}
+
+		if (mode === 'session') {
+			res.cookie(env['SESSION_COOKIE_NAME'] as string, accessToken, SESSION_COOKIE_OPTIONS);
+		}
+
+		res.locals['payload'] = { data: payload };
 		return next();
 	}),
-	respond
+	respond,
 );
 
 router.post(
 	'/logout',
 	asyncHandler(async (req, res, next) => {
-		const accountability = {
-			ip: req.ip,
-			userAgent: req.get('user-agent'),
-			role: null,
-		};
+		const accountability: Accountability = createDefaultAccountability({ ip: getIPFromReq(req) });
+
+		const userAgent = req.get('user-agent')?.substring(0, 1024);
+		if (userAgent) accountability.userAgent = userAgent;
+
+		const origin = req.get('origin');
+		if (origin) accountability.origin = origin;
 
 		const authenticationService = new AuthenticationService({
 			accountability: accountability,
 			schema: req.schema,
 		});
 
-		const currentRefreshToken = req.body.refresh_token || req.cookies[env.REFRESH_TOKEN_COOKIE_NAME];
+		const mode = getCurrentMode(req);
+		const currentRefreshToken = getCurrentRefreshToken(req, mode);
 
 		if (!currentRefreshToken) {
-			throw new InvalidPayloadException(`"refresh_token" is required in either the JSON payload or Cookie`);
+			throw new InvalidPayloadError({
+				reason: `The refresh token is required in either the payload or cookie`,
+			});
 		}
 
 		await authenticationService.logout(currentRefreshToken);
 
-		if (req.cookies[env.REFRESH_TOKEN_COOKIE_NAME]) {
-			res.clearCookie(env.REFRESH_TOKEN_COOKIE_NAME, {
-				httpOnly: true,
-				domain: env.REFRESH_TOKEN_COOKIE_DOMAIN,
-				secure: env.REFRESH_TOKEN_COOKIE_SECURE ?? false,
-				sameSite: (env.REFRESH_TOKEN_COOKIE_SAME_SITE as 'lax' | 'strict' | 'none') || 'strict',
-			});
+		if (req.cookies[env['REFRESH_TOKEN_COOKIE_NAME'] as string]) {
+			res.clearCookie(env['REFRESH_TOKEN_COOKIE_NAME'] as string, REFRESH_COOKIE_OPTIONS);
+		}
+
+		if (req.cookies[env['SESSION_COOKIE_NAME'] as string]) {
+			res.clearCookie(env['SESSION_COOKIE_NAME'] as string, SESSION_COOKIE_OPTIONS);
 		}
 
 		return next();
 	}),
-	respond
+	respond,
 );
 
 router.post(
 	'/password/request',
-	asyncHandler(async (req, res, next) => {
+	asyncHandler(async (req, _res, next) => {
 		if (typeof req.body.email !== 'string') {
-			throw new InvalidPayloadException(`"email" field is required.`);
+			throw new InvalidPayloadError({ reason: `"email" field is required` });
 		}
 
-		const accountability = {
-			ip: req.ip,
-			userAgent: req.get('user-agent'),
-			role: null,
-		};
+		const accountability: Accountability = createDefaultAccountability({ ip: getIPFromReq(req) });
+
+		const userAgent = req.get('user-agent')?.substring(0, 1024);
+		if (userAgent) accountability.userAgent = userAgent;
+
+		const origin = req.get('origin');
+		if (origin) accountability.origin = origin;
 
 		const service = new UsersService({ accountability, schema: req.schema });
 
@@ -145,7 +212,7 @@ router.post(
 			await service.requestPasswordReset(req.body.email, req.body.reset_url || null);
 			return next();
 		} catch (err: any) {
-			if (err instanceof InvalidPayloadException) {
+			if (isDirectusError(err, ErrorCode.InvalidPayload)) {
 				throw err;
 			} else {
 				logger.warn(err, `[email] ${err}`);
@@ -153,192 +220,49 @@ router.post(
 			}
 		}
 	}),
-	respond
+	respond,
 );
 
 router.post(
 	'/password/reset',
-	asyncHandler(async (req, res, next) => {
+	asyncHandler(async (req, _res, next) => {
 		if (typeof req.body.token !== 'string') {
-			throw new InvalidPayloadException(`"token" field is required.`);
+			throw new InvalidPayloadError({ reason: `"token" field is required` });
 		}
 
 		if (typeof req.body.password !== 'string') {
-			throw new InvalidPayloadException(`"password" field is required.`);
+			throw new InvalidPayloadError({ reason: `"password" field is required` });
 		}
 
-		const accountability = {
-			ip: req.ip,
-			userAgent: req.get('user-agent'),
-			role: null,
-		};
+		const accountability: Accountability = createDefaultAccountability({ ip: getIPFromReq(req) });
+
+		const userAgent = req.get('user-agent')?.substring(0, 1024);
+		if (userAgent) accountability.userAgent = userAgent;
+
+		const origin = req.get('origin');
+		if (origin) accountability.origin = origin;
 
 		const service = new UsersService({ accountability, schema: req.schema });
 		await service.resetPassword(req.body.token, req.body.password);
 		return next();
 	}),
-	respond
+	respond,
 );
 
 router.get(
 	'/',
 	asyncHandler(async (req, res, next) => {
-		res.locals.payload = { data: getAuthProviders() };
+		const sessionOnly =
+			'sessionOnly' in req.query && (req.query['sessionOnly'] === '' || Boolean(req.query['sessionOnly']));
+
+		res.locals['payload'] = {
+			data: getAuthProviders({ sessionOnly }),
+			disableDefault: env['AUTH_DISABLE_DEFAULT'],
+		};
+
 		return next();
 	}),
-	respond
-);
-
-router.get(
-	'/oauth',
-	asyncHandler(async (req, res, next) => {
-		const providers = toArray(env.OAUTH_PROVIDERS);
-		res.locals.payload = { data: env.OAUTH_PROVIDERS ? providers : null };
-		return next();
-	}),
-	respond
-);
-
-router.get(
-	'/oauth/:provider',
-	asyncHandler(async (req, res, next) => {
-		const config = { ...grantConfig };
-		delete config.defaults;
-
-		const availableProviders = Object.keys(config);
-
-		if (availableProviders.includes(req.params.provider) === false) {
-			throw new RouteNotFoundException(`/auth/oauth/${req.params.provider}`);
-		}
-
-		if (req.query?.redirect && req.session) {
-			req.session.redirect = req.query.redirect as string;
-		}
-
-		const hookPayload = {
-			provider: req.params.provider,
-			redirect: req.query?.redirect,
-		};
-
-		emitAsyncSafe(`oauth.${req.params.provider}.redirect`, {
-			event: `oauth.${req.params.provider}.redirect`,
-			action: 'redirect',
-			schema: req.schema,
-			payload: hookPayload,
-			accountability: req.accountability,
-			user: null,
-		});
-
-		await emitter.emitAsync(`oauth.${req.params.provider}.redirect.before`, {
-			event: `oauth.${req.params.provider}.redirect.before`,
-			action: 'redirect',
-			schema: req.schema,
-			payload: hookPayload,
-			accountability: req.accountability,
-			user: null,
-		});
-
-		next();
-	})
-);
-
-router.use(grant.express()(grantConfig));
-
-router.get(
-	'/oauth/:provider/callback',
-	asyncHandler(async (req, res, next) => {
-		const redirect = req.session.redirect;
-
-		const accountability = {
-			ip: req.ip,
-			userAgent: req.get('user-agent'),
-			role: null,
-		};
-
-		const authenticationService = new AuthenticationService({
-			accountability: accountability,
-			schema: req.schema,
-		});
-
-		let authResponse: { accessToken: any; refreshToken: any; expires: any; id?: any };
-
-		const hookPayload = req.session.grant.response;
-
-		await emitter.emitAsync(`oauth.${req.params.provider}.login.before`, hookPayload, {
-			event: `oauth.${req.params.provider}.login.before`,
-			action: 'oauth.login',
-			schema: req.schema,
-			payload: hookPayload,
-			accountability: accountability,
-			status: 'pending',
-			user: null,
-		});
-
-		const emitStatus = (status: 'fail' | 'success') => {
-			emitAsyncSafe(`oauth.${req.params.provider}.login`, hookPayload, {
-				event: `oauth.${req.params.provider}.login`,
-				action: 'oauth.login',
-				schema: req.schema,
-				payload: hookPayload,
-				accountability: accountability,
-				status,
-				user: null,
-			});
-		};
-
-		try {
-			const email = getEmailFromProfile(req.params.provider, req.session.grant.response?.profile);
-
-			req.session?.destroy(() => {
-				// Do nothing
-			});
-
-			// Workaround to use the default local auth provider to validate
-			// the email and login without a password.
-			authResponse = await authenticationService.login(DEFAULT_AUTH_PROVIDER, { email });
-		} catch (error: any) {
-			emitStatus('fail');
-
-			logger.warn(error);
-
-			if (redirect) {
-				let reason = 'UNKNOWN_EXCEPTION';
-
-				if (error instanceof ServiceUnavailableException) {
-					reason = 'SERVICE_UNAVAILABLE';
-				} else if (error instanceof InvalidCredentialsException) {
-					reason = 'INVALID_USER';
-				}
-
-				return res.redirect(`${redirect.split('?')[0]}?reason=${reason}`);
-			}
-
-			throw error;
-		}
-
-		const { accessToken, refreshToken, expires } = authResponse;
-
-		emitStatus('success');
-
-		if (redirect) {
-			res.cookie(env.REFRESH_TOKEN_COOKIE_NAME, refreshToken, {
-				httpOnly: true,
-				domain: env.REFRESH_TOKEN_COOKIE_DOMAIN,
-				maxAge: ms(env.REFRESH_TOKEN_TTL as string),
-				secure: env.REFRESH_TOKEN_COOKIE_SECURE ?? false,
-				sameSite: (env.REFRESH_TOKEN_COOKIE_SAME_SITE as 'lax' | 'strict' | 'none') || 'strict',
-			});
-
-			return res.redirect(redirect);
-		} else {
-			res.locals.payload = {
-				data: { access_token: accessToken, refresh_token: refreshToken, expires },
-			};
-
-			return next();
-		}
-	}),
-	respond
+	respond,
 );
 
 export default router;

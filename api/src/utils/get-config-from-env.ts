@@ -1,12 +1,14 @@
+import { useEnv } from '@directus/env';
 import camelcase from 'camelcase';
-import { set } from 'lodash';
-import env from '../env';
+import { set } from 'lodash-es';
 
 export function getConfigFromEnv(
 	prefix: string,
 	omitPrefix?: string | string[],
-	type: 'camelcase' | 'underscore' = 'camelcase'
+	type: 'camelcase' | 'underscore' = 'camelcase',
 ): Record<string, any> {
+	const env = useEnv();
+
 	const config: any = {};
 
 	for (const [key, value] of Object.entries(env)) {
@@ -28,6 +30,7 @@ export function getConfigFromEnv(
 			const path = key
 				.split('__')
 				.map((key, index) => (index === 0 ? transform(transform(key.slice(prefix.length))) : transform(key)));
+
 			set(config, path.join('.'), value);
 		} else {
 			config[transform(key.slice(prefix.length))] = value;
@@ -38,7 +41,7 @@ export function getConfigFromEnv(
 
 	function transform(key: string): string {
 		if (type === 'camelcase') {
-			return camelcase(key);
+			return camelcase(key, { locale: false });
 		} else if (type === 'underscore') {
 			return key.toLowerCase();
 		}

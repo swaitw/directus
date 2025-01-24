@@ -1,6 +1,7 @@
-import { RequestHandler } from 'express';
-import emitter from '../emitter';
-import { RouteNotFoundException } from '../exceptions';
+import type { RequestHandler } from 'express';
+import getDatabase from '../database/index.js';
+import emitter from '../emitter.js';
+import { RouteNotFoundError } from '@directus/errors';
 
 /**
  * Handles not found routes.
@@ -15,11 +16,22 @@ import { RouteNotFoundException } from '../exceptions';
  */
 const notFound: RequestHandler = async (req, res, next) => {
 	try {
-		const hooksResult = await emitter.emitAsync('request.not_found', req, res);
-		if (hooksResult.reduce((prev, current) => current || prev, false)) {
+		const hooksResult = await emitter.emitFilter(
+			'request.not_found',
+			false,
+			{ request: req, response: res },
+			{
+				database: getDatabase(),
+				schema: req.schema,
+				accountability: req.accountability ?? null,
+			},
+		);
+
+		if (hooksResult) {
 			return next();
 		}
-		next(new RouteNotFoundException(req.path));
+
+		next(new RouteNotFoundError({ path: req.path }));
 	} catch (err: any) {
 		next(err);
 	}

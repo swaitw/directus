@@ -1,20 +1,5 @@
-<template>
-	<span v-if="simple" class="rating simple">
-		<v-icon small name="star" />
-		{{ value }}
-	</span>
-	<div v-else v-tooltip.bottom.start="value" class="rating detailed">
-		<div class="active" :style="ratingPercentage">
-			<v-icon v-for="index in starCount" :key="index" small name="star" />
-		</div>
-		<div class="inactive">
-			<v-icon v-for="index in starCount" :key="index" small name="star" />
-		</div>
-	</div>
-</template>
-
-<script lang="ts">
-import { defineComponent, computed, PropType } from 'vue';
+<script setup lang="ts">
+import { computed } from 'vue';
 
 type InterfaceOptions = {
 	minValue: number;
@@ -22,47 +7,54 @@ type InterfaceOptions = {
 	stepInterval: number;
 };
 
-export default defineComponent({
-	props: {
-		value: {
-			type: [String, Number],
-			default: null,
-		},
-		simple: {
-			type: Boolean,
-			default: false,
-		},
-		interfaceOptions: {
-			type: Object as PropType<InterfaceOptions>,
-			default: null,
-		},
-	},
-	setup(props) {
-		const starCount = computed(() => {
-			if (props.interfaceOptions === null) return 5;
+interface Props {
+	value?: string | number | null;
+	simple?: boolean;
+	interfaceOptions?: InterfaceOptions | null;
+}
 
-			return Math.ceil(props.interfaceOptions.maxValue);
-		});
-
-		const ratingPercentage = computed(() => ({
-			width: (Number(props.value) / starCount.value) * 100 + '%',
-		}));
-
-		return { starCount, ratingPercentage };
-	},
+const props = withDefaults(defineProps<Props>(), {
+	value: undefined,
+	simple: false,
+	interfaceOptions: undefined,
 });
+
+const starCount = computed(() => {
+	if (props.interfaceOptions === null) return 5;
+
+	return Math.ceil(props.interfaceOptions?.maxValue ?? 5);
+});
+
+const ratingPercentage = computed(() => ({
+	width: (Number(props.value) / starCount.value) * 100 + '%',
+}));
 </script>
+
+<template>
+	<span v-if="simple" class="rating simple">
+		<v-icon small name="star" filled />
+		{{ value }}
+	</span>
+	<div v-else v-tooltip.bottom.start="value" class="rating detailed">
+		<div class="active" :style="ratingPercentage">
+			<v-icon v-for="index in starCount" :key="index" small name="star" filled />
+		</div>
+		<div class="inactive">
+			<v-icon v-for="index in starCount" :key="index" small name="star" />
+		</div>
+	</div>
+</template>
 
 <style lang="scss" scoped>
 .rating {
 	&.simple {
-		display: flex;
+		display: inline-flex;
 		align-items: center;
 		padding: 2px 6px 2px 4px;
 		color: #ffc107;
 		font-weight: 600;
-		background-color: rgba(255, 193, 7, 0.15);
-		border-radius: var(--border-radius);
+		background-color: rgb(255 193 7 / 0.15);
+		border-radius: var(--theme--border-radius);
 
 		.v-icon {
 			margin-right: 4px;
@@ -72,11 +64,13 @@ export default defineComponent({
 	&.detailed {
 		position: relative;
 		width: min-content;
+		display: inline-flex;
+		height: var(--v-icon-size, 24px);
 
 		.active {
 			position: relative;
 			z-index: 2;
-			display: flex;
+			display: inline-flex;
 			width: 0%;
 			overflow: hidden;
 			color: #ffc107;
@@ -87,8 +81,8 @@ export default defineComponent({
 			top: 0;
 			left: 0;
 			z-index: 1;
-			display: flex;
-			color: var(--background-normal);
+			display: inline-flex;
+			color: var(--theme--background-normal);
 		}
 	}
 }

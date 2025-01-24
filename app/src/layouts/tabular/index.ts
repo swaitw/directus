@@ -1,99 +1,94 @@
-import { defineLayout } from '@directus/shared/utils';
-import TabularLayout from './tabular.vue';
-import TabularOptions from './options.vue';
-import TabularSidebar from './sidebar.vue';
-import TabularActions from './actions.vue';
-
-import { useI18n } from 'vue-i18n';
-import { ref, computed, inject, watch, toRefs } from 'vue';
-
-import { HeaderRaw, Item } from '@/components/v-table/types';
-import { Field } from '@directus/shared/types';
-import { useRouter } from 'vue-router';
-import { debounce, clone } from 'lodash';
-import { useCollection } from '@directus/shared/composables';
-import { useItems } from '@directus/shared/composables';
-import adjustFieldsForDisplays from '@/utils/adjust-fields-for-displays';
-import hideDragImage from '@/utils/hide-drag-image';
+import { HeaderRaw, Sort } from '@/components/v-table/types';
+import { useAliasFields } from '@/composables/use-alias-fields';
+import { useLayoutClickHandler } from '@/composables/use-layout-click-handler';
+import { useFieldsStore } from '@/stores/fields';
+import { adjustFieldsForDisplays } from '@/utils/adjust-fields-for-displays';
+import { formatItemsCountPaginated } from '@/utils/format-items-count';
 import { getDefaultDisplayForType } from '@/utils/get-default-display-for-type';
-import { useSync } from '@directus/shared/composables';
+import { hideDragImage } from '@/utils/hide-drag-image';
+import { saveAsCSV } from '@/utils/save-as-csv';
+import { syncRefProperty } from '@/utils/sync-ref-property';
+import { useCollection, useItems, useSync } from '@directus/composables';
+import { defineLayout } from '@directus/extensions';
+import { Field } from '@directus/types';
+import { debounce, flatten } from 'lodash';
+import { computed, ref, toRefs, unref, watch } from 'vue';
+import { useI18n } from 'vue-i18n';
+import TabularActions from './actions.vue';
+import TabularOptions from './options.vue';
+import TabularLayout from './tabular.vue';
 import { LayoutOptions, LayoutQuery } from './types';
 
 export default defineLayout<LayoutOptions, LayoutQuery>({
 	id: 'tabular',
 	name: '$t:layouts.tabular.tabular',
-	icon: 'reorder',
+	icon: 'table_rows',
 	component: TabularLayout,
 	slots: {
 		options: TabularOptions,
-		sidebar: TabularSidebar,
+		sidebar: () => undefined,
 		actions: TabularActions,
 	},
+	headerShadow: false,
 	setup(props, { emit }) {
 		const { t, n } = useI18n();
-
-		const router = useRouter();
-
-		const mainElement = inject('main-element', ref<Element | null>(null));
+		const fieldsStore = useFieldsStore();
 
 		const selection = useSync(props, 'selection', emit);
 		const layoutOptions = useSync(props, 'layoutOptions', emit);
 		const layoutQuery = useSync(props, 'layoutQuery', emit);
-		const filters = useSync(props, 'filters', emit);
-		const searchQuery = useSync(props, 'searchQuery', emit);
 
-		const { collection } = toRefs(props);
+		const { collection, filter, filterSystem, filterUser, search } = toRefs(props);
 
 		const { info, primaryKeyField, fields: fieldsInCollection, sortField } = useCollection(collection);
 
-		const { sort, limit, page, fields, fieldsWithRelational } = useItemOptions();
+		const { sort, limit, page, fields } = useItemOptions();
 
-		const { items, loading, error, totalPages, itemCount, totalCount, changeManualSort, getItems } = useItems(
-			collection,
-			{
-				sort,
-				limit,
-				page,
-				fields: fieldsWithRelational,
-				filters: filters,
-				searchQuery: searchQuery,
-			}
+		const { aliasedFields, aliasQuery, aliasedKeys } = useAliasFields(fields, collection);
+
+		const fieldsWithRelationalAliased = computed(() =>
+			flatten(Object.values(aliasedFields.value).map(({ fields }) => fields)),
 		);
 
-		const { tableSort, tableHeaders, tableRowHeight, onRowClick, onSortChange, activeFields, tableSpacing } =
+		const { onClick } = useLayoutClickHandler({ props, selection, primaryKeyField });
+
+		const {
+			items,
+			loading,
+			error,
+			totalPages,
+			itemCount,
+			totalCount,
+			changeManualSort,
+			getItems,
+			getItemCount,
+			getTotalCount,
+		} = useItems(collection, {
+			sort,
+			limit,
+			page,
+			fields: fieldsWithRelationalAliased,
+			alias: aliasQuery,
+			filter,
+			search,
+			filterSystem,
+		});
+
+		const { tableSort, tableHeaders, tableRowHeight, onSortChange, onAlignChange, activeFields, tableSpacing } =
 			useTable();
 
 		const showingCount = computed(() => {
-			if ((itemCount.value || 0) < (totalCount.value || 0)) {
-				if (itemCount.value === 1) {
-					return t('one_filtered_item');
-				}
-				return t('start_end_of_count_filtered_items', {
-					start: n((+page.value - 1) * limit.value + 1),
-					end: n(Math.min(page.value * limit.value, itemCount.value || 0)),
-					count: n(itemCount.value || 0),
-				});
-			}
-			if (itemCount.value === 1) {
-				return t('one_item');
-			}
-			return t('start_end_of_count_items', {
-				start: n((+page.value - 1) * limit.value + 1),
-				end: n(Math.min(page.value * limit.value, itemCount.value || 0)),
-				count: n(itemCount.value || 0),
+			// Don't show count if there are no items
+			if (!totalCount.value || !itemCount.value) return;
+
+			return formatItemsCountPaginated({
+				currentItems: itemCount.value,
+				currentPage: page.value,
+				perPage: limit.value,
+				isFiltered: !!filterUser.value,
+				totalItems: totalCount.value,
+				i18n: { t, n },
 			});
-		});
-
-		const activeFilterCount = computed(() => {
-			let count = filters.value.filter((filter) => !filter.locked).length;
-
-			if (searchQuery.value && searchQuery.value.length > 0) count++;
-
-			return count;
-		});
-
-		const availableFields = computed(() => {
-			return fieldsInCollection.value.filter((field: Field) => field.meta?.special?.includes('no-data') !== true);
 		});
 
 		return {
@@ -103,8 +98,9 @@ export default defineLayout<LayoutOptions, LayoutQuery>({
 			error,
 			totalPages,
 			tableSort,
-			onRowClick,
+			onRowClick: onClick,
 			onSortChange,
+			onAlignChange,
 			tableRowHeight,
 			page,
 			toPage,
@@ -121,11 +117,15 @@ export default defineLayout<LayoutOptions, LayoutQuery>({
 			sortField,
 			changeManualSort,
 			hideDragImage,
-			activeFilterCount,
 			refresh,
 			resetPresetAndRefresh,
 			selectAll,
-			availableFields,
+			filter,
+			search,
+			download,
+			fieldsWithRelationalAliased,
+			aliasedFields,
+			aliasedKeys,
 		};
 
 		async function resetPresetAndRefresh() {
@@ -135,92 +135,54 @@ export default defineLayout<LayoutOptions, LayoutQuery>({
 
 		function refresh() {
 			getItems();
+			getTotalCount();
+			getItemCount();
+		}
+
+		function download() {
+			if (!collection.value) return;
+			saveAsCSV(collection.value, fields.value, items.value);
 		}
 
 		function toPage(newPage: number) {
 			page.value = newPage;
-			mainElement.value?.scrollTo({
-				top: 0,
-				behavior: 'smooth',
-			});
 		}
 
 		function selectAll() {
 			if (!primaryKeyField.value) return;
 			const pk = primaryKeyField.value;
-			selection.value = clone(items.value).map((item) => item[pk.field]);
+			selection.value = items.value.map((item) => item[pk.field]);
 		}
 
 		function useItemOptions() {
-			const page = computed({
-				get() {
-					return layoutQuery.value?.page || 1;
-				},
-				set(newPage: number) {
-					layoutQuery.value = {
-						...(layoutQuery.value || {}),
-						page: newPage,
-					};
-				},
+			const page = syncRefProperty(layoutQuery, 'page', 1);
+			const limit = syncRefProperty(layoutQuery, 'limit', 25);
+
+			const defaultSort = computed(() => {
+				const field = sortField.value ?? primaryKeyField.value?.field;
+				return field ? [field] : [];
 			});
 
-			const sort = computed({
-				get() {
-					return layoutQuery.value?.sort || primaryKeyField.value?.field || '';
-				},
-				set(newSort: string) {
-					layoutQuery.value = {
-						...(layoutQuery.value || {}),
-						page: 1,
-						sort: newSort,
-					};
-				},
-			});
+			const sort = syncRefProperty(layoutQuery, 'sort', defaultSort);
 
-			const limit = computed({
-				get() {
-					return layoutQuery.value?.limit || 25;
-				},
-				set(newLimit: number) {
-					layoutQuery.value = {
-						...(layoutQuery.value || {}),
-						page: 1,
-						limit: newLimit,
-					};
-				},
+			const fieldsDefaultValue = computed(() => {
+				return fieldsInCollection.value
+					.filter((field) => !field.meta?.hidden && !field.meta?.special?.includes('no-data'))
+					.slice(0, 4)
+					.map(({ field }) => field)
+					.sort();
 			});
 
 			const fields = computed({
 				get() {
 					if (layoutQuery.value?.fields) {
-						// This shouldn't be the case, but double check just in case it's stored
-						// differently in the DB from previous versions
-						if (typeof layoutQuery.value.fields === 'string') {
-							return (layoutQuery.value.fields as string).split(',');
-						}
-
-						if (Array.isArray(layoutQuery.value.fields)) return layoutQuery.value.fields;
+						return layoutQuery.value.fields.filter((field) => fieldsStore.getField(collection.value!, field));
+					} else {
+						return unref(fieldsDefaultValue);
 					}
-
-					const fields =
-						layoutQuery.value?.fields ||
-						fieldsInCollection.value
-							.filter((field: Field) => !!field.meta?.hidden === false)
-							.slice(0, 4)
-							.sort((a: Field, b: Field) => {
-								if (a.field < b.field) return -1;
-								else if (a.field > b.field) return 1;
-								else return 1;
-							})
-							.map(({ field }: Field) => field);
-
-					return fields;
 				},
-				set(newFields: string[]) {
-					layoutQuery.value = {
-						...(layoutQuery.value || {}),
-						fields: newFields,
-					};
+				set(value) {
+					layoutQuery.value = Object.assign({}, layoutQuery.value, { fields: value });
 				},
 			});
 
@@ -234,10 +196,12 @@ export default defineLayout<LayoutOptions, LayoutQuery>({
 
 		function useTable() {
 			const tableSort = computed(() => {
-				if (sort.value?.startsWith('-')) {
-					return { by: sort.value.substring(1), desc: true };
+				if (!sort.value?.[0]) {
+					return null;
+				} else if (sort.value?.[0].startsWith('-')) {
+					return { by: sort.value[0].substring(1), desc: true };
 				} else {
-					return { by: sort.value, desc: false };
+					return { by: sort.value[0], desc: false };
 				}
 			});
 
@@ -247,21 +211,22 @@ export default defineLayout<LayoutOptions, LayoutQuery>({
 				() => layoutOptions.value,
 				() => {
 					localWidths.value = {};
-				}
+				},
 			);
 
-			const saveWidthsTolayoutOptions = debounce(() => {
-				layoutOptions.value = {
-					...(layoutOptions.value || {}),
+			const saveWidthsToLayoutOptions = debounce(() => {
+				layoutOptions.value = Object.assign({}, layoutOptions.value, {
 					widths: localWidths.value,
-				};
+				});
 			}, 350);
 
-			const activeFields = computed<Field[]>({
+			const activeFields = computed<(Field & { key: string })[]>({
 				get() {
+					if (!collection.value) return [];
+
 					return fields.value
-						.map((key) => fieldsInCollection.value.find((field: Field) => field.field === key))
-						.filter((f) => f) as Field[];
+						.map((key) => ({ ...fieldsStore.getField(collection.value!, key), key }))
+						.filter((f) => f && f.meta?.special?.includes('no-data') !== true) as (Field & { key: string })[];
 				},
 				set(val) {
 					fields.value = val.map((field) => field.field);
@@ -270,23 +235,39 @@ export default defineLayout<LayoutOptions, LayoutQuery>({
 
 			const tableHeaders = computed<HeaderRaw[]>({
 				get() {
-					return activeFields.value.map((field) => ({
-						text: field.name,
-						value: field.field,
-						width: localWidths.value[field.field] || layoutOptions.value?.widths?.[field.field] || null,
-						field: {
-							display: field.meta?.display || getDefaultDisplayForType(field.type),
-							displayOptions: field.meta?.display_options,
-							interface: field.meta?.interface,
-							interfaceOptions: field.meta?.options,
-							type: field.type,
-							field: field.field,
-						},
-						sortable:
-							['json', 'o2m', 'm2o', 'm2m', 'm2a', 'file', 'files', 'alias', 'presentation', 'translations'].includes(
-								field.type
-							) === false,
-					}));
+					return activeFields.value.map((field) => {
+						let description: string | null = null;
+
+						const fieldParts = field.key.split('.');
+
+						if (fieldParts.length > 1) {
+							const fieldNames = fieldParts.map((fieldKey, index) => {
+								const pathPrefix = fieldParts.slice(0, index);
+								const field = fieldsStore.getField(collection.value!, [...pathPrefix, fieldKey].join('.'));
+								return field?.name ?? fieldKey;
+							});
+
+							description = fieldNames.join(' -> ');
+						}
+
+						return {
+							text: field.name,
+							value: field.key,
+							description,
+							width: localWidths.value[field.key] || layoutOptions.value?.widths?.[field.key] || null,
+							align: layoutOptions.value?.align?.[field.key] || 'left',
+							field: {
+								display: field.meta?.display || getDefaultDisplayForType(field.type),
+								displayOptions: field.meta?.display_options,
+								interface: field.meta?.interface,
+								interfaceOptions: field.meta?.options,
+								type: field.type,
+								field: field.field,
+								collection: field.collection,
+							},
+							sortable: ['json', 'alias', 'presentation', 'translations'].includes(field.type) === false,
+						} as HeaderRaw;
+					});
 				},
 				set(val) {
 					const widths = {} as { [field: string]: number };
@@ -299,21 +280,13 @@ export default defineLayout<LayoutOptions, LayoutQuery>({
 
 					localWidths.value = widths;
 
-					saveWidthsTolayoutOptions();
+					saveWidthsToLayoutOptions();
+
+					fields.value = val.map((header) => header.value);
 				},
 			});
 
-			const tableSpacing = computed({
-				get() {
-					return layoutOptions.value?.spacing || 'cozy';
-				},
-				set(newSpacing: 'compact' | 'cozy' | 'comfortable') {
-					layoutOptions.value = {
-						...(layoutOptions.value || {}),
-						spacing: newSpacing,
-					};
-				},
-			});
+			const tableSpacing = syncRefProperty(layoutOptions, 'spacing', 'cozy');
 
 			const tableRowHeight = computed<number>(() => {
 				switch (tableSpacing.value) {
@@ -332,44 +305,44 @@ export default defineLayout<LayoutOptions, LayoutQuery>({
 				tableHeaders,
 				tableSpacing,
 				tableRowHeight,
-				onRowClick,
 				onSortChange,
+				onAlignChange,
 				activeFields,
 				getFieldDisplay,
 			};
 
-			function onRowClick(item: Item) {
-				if (props.readonly === true || !primaryKeyField.value) return;
-
-				const primaryKey = item[primaryKeyField.value.field];
-
-				if (props.selectMode || selection.value?.length > 0) {
-					if (selection.value?.includes(primaryKey) === false) {
-						selection.value.push(primaryKey);
-					} else {
-						selection.value = selection.value.filter((item) => item !== primaryKey);
-					}
-				} else {
-					router.push(`/collections/${collection.value}/${encodeURIComponent(primaryKey)}`);
+			function onSortChange(newSort: Sort | null) {
+				if (!newSort?.by) {
+					sort.value = [];
+					return;
 				}
+
+				let sortString = newSort.by;
+
+				if (newSort.desc === true) {
+					sortString = '-' + sortString;
+				}
+
+				sort.value = [sortString];
 			}
 
-			function onSortChange(newSort: { by: string; desc: boolean }) {
-				let sortString = newSort.by;
-				if (newSort.desc === true) sortString = '-' + sortString;
-
-				sort.value = sortString;
+			function onAlignChange(field: string, align: 'left' | 'center' | 'right') {
+				layoutOptions.value = Object.assign({}, layoutOptions.value, {
+					align: {
+						...(layoutOptions.value?.align ?? {}),
+						[field]: align,
+					},
+				});
 			}
 
 			function getFieldDisplay(fieldKey: string) {
 				const field = fieldsInCollection.value.find((field: Field) => field.field === fieldKey);
 
-				if (field === undefined) return null;
-				if (!field.meta?.display) return null;
+				if (!field?.meta?.display) return null;
 
 				return {
-					display: field.meta?.display,
-					options: field.meta?.display_options,
+					display: field.meta.display,
+					options: field.meta.display_options,
 				};
 			}
 		}

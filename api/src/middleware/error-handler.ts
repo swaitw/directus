@@ -1,95 +1,123 @@
-import { ErrorRequestHandler } from 'express';
-import { emitAsyncSafe } from '../emitter';
-import env from '../env';
-import { MethodNotAllowedException } from '../exceptions';
-import { BaseException } from '@directus/shared/exceptions';
-import logger from '../logger';
-import { toArray } from '@directus/shared/utils';
+import { ErrorCode, InternalServerError, isDirectusError } from '@directus/errors';
+import type { DeepPartial } from '@directus/types';
+import { isObject } from '@directus/utils';
+import { getNodeEnv } from '@directus/utils/node';
+import type { ErrorRequestHandler } from 'express';
+import getDatabase from '../database/index.js';
+import emitter from '../emitter.js';
+import { useLogger } from '../logger/index.js';
 
-// Note: keep all 4 parameters here. That's how Express recognizes it's the error handler, even if
-// we don't use next
-const errorHandler: ErrorRequestHandler = (err, req, res, _next) => {
-	let payload: any = {
-		errors: [],
+type ApiError = {
+	message: string;
+	extensions: {
+		code: string;
+		[key: string]: any;
 	};
+};
 
-	const errors = toArray(err);
+const FALLBACK_ERROR = new InternalServerError();
 
-	if (errors.some((err) => err instanceof BaseException === false)) {
-		res.status(500);
-	} else {
-		let status = errors[0].status;
+export const errorHandler = asyncErrorHandler(async (err, req, res) => {
+	const logger = useLogger();
 
-		for (const err of errors) {
-			if (status !== err.status) {
-				// If there's multiple different status codes in the errors, use 500
-				status = 500;
-				break;
+	let errors: ApiError[] = [];
+	let status: number | null = null;
+
+	// It can be assumed that at least one error is given
+	const receivedErrors: unknown[] = Array.isArray(err) ? err : [err];
+
+	for (const error of receivedErrors) {
+		// In dev mode, if available, expose stack trace under error's extensions data
+		if (getNodeEnv() === 'development' && error instanceof Error && error.stack) {
+			((error as DeepPartial<ApiError>).extensions ??= {})['stack'] = error.stack;
+		}
+
+		if (isDirectusError(error)) {
+			logger.debug(error);
+
+			if (status === null) {
+				// Use current error status as response status
+				status = error.status;
+			} else if (status !== error.status) {
+				// Fallback if status has already been set by a preceding error
+				// and doesn't match the current one
+				status = FALLBACK_ERROR.status;
 			}
-		}
 
-		res.status(status);
-	}
-
-	for (const err of errors) {
-		if (env.NODE_ENV === 'development') {
-			err.extensions = {
-				...(err.extensions || {}),
-				stack: err.stack,
-			};
-		}
-
-		if (err instanceof BaseException) {
-			logger.debug(err);
-
-			res.status(err.status);
-
-			payload.errors.push({
-				message: err.message,
+			errors.push({
+				message: error.message,
 				extensions: {
-					code: err.code,
-					...err.extensions,
+					...(error.extensions ?? {}),
+					// Expose error code under error's extensions data
+					code: error.code,
 				},
 			});
 
-			if (err instanceof MethodNotAllowedException) {
-				res.header('Allow', err.extensions.allow.join(', '));
+			if (isDirectusError(error, ErrorCode.MethodNotAllowed)) {
+				res.header('Allow', error.extensions.allowed.join(', '));
 			}
 		} else {
-			logger.error(err);
+			logger.error(error);
 
-			res.status(500);
+			status = FALLBACK_ERROR.status;
 
 			if (req.accountability?.admin === true) {
-				payload = {
-					errors: [
-						{
-							message: err.message,
-							extensions: {
-								code: 'INTERNAL_SERVER_ERROR',
-								...err.extensions,
-							},
+				const localError = isObject(error) ? error : {};
+
+				// Use 'message' prop if available, otherwise if 'error' is a string use that
+				const message =
+					(typeof localError['message'] === 'string' ? localError['message'] : null) ??
+					(typeof error === 'string' ? error : null);
+
+				errors = [
+					{
+						message: message || FALLBACK_ERROR.message,
+						extensions: {
+							code: FALLBACK_ERROR.code,
+							...(localError['extensions'] ?? {}),
 						},
-					],
-				};
+					},
+				];
 			} else {
-				payload = {
-					errors: [
-						{
-							message: 'An unexpected error occurred.',
-							extensions: {
-								code: 'INTERNAL_SERVER_ERROR',
-							},
-						},
-					],
-				};
+				// Don't expose unknown errors to non-admin users
+				errors = [{ message: FALLBACK_ERROR.message, extensions: { code: FALLBACK_ERROR.code } }];
 			}
 		}
 	}
 
-	emitAsyncSafe('error', payload.errors).then(() => {
-		return res.json(payload);
-	});
-};
+	res.status(status ?? FALLBACK_ERROR.status);
 
-export default errorHandler;
+	const updatedErrors = await emitter.emitFilter(
+		'request.error',
+		errors,
+		{},
+		{
+			database: getDatabase(),
+			schema: req.schema,
+			accountability: req.accountability ?? null,
+		},
+	);
+
+	return res.json({ errors: updatedErrors });
+});
+
+function asyncErrorHandler(
+	fn: (...args: Parameters<ErrorRequestHandler>) => Promise<any>,
+): (...args: Parameters<ErrorRequestHandler>) => Promise<ReturnType<ErrorRequestHandler>> {
+	return (err, req, res, next) =>
+		fn(err, req, res, next).catch((error) => {
+			// To be on the safe side and ensure this doesn't lead to an unhandled (potentially crashing) error
+			try {
+				const logger = useLogger();
+				logger.error(error, 'Unexpected error in error handler');
+			} catch {
+				// Ignore
+			}
+
+			// Delegate to default error handler to close the connection
+			if (res.headersSent) return next(err);
+
+			res.status(FALLBACK_ERROR.status);
+			return res.json({ errors: [{ message: FALLBACK_ERROR.message, extensions: { code: FALLBACK_ERROR.code } }] });
+		});
+}

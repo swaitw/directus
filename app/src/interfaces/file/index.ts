@@ -1,5 +1,6 @@
-import { defineInterface } from '@directus/shared/utils';
+import { defineInterface } from '@directus/extensions';
 import InterfaceFile from './file.vue';
+import PreviewSVG from './preview.svg?raw';
 
 export default defineInterface({
 	id: 'file',
@@ -8,7 +9,8 @@ export default defineInterface({
 	icon: 'note_add',
 	component: InterfaceFile,
 	types: ['uuid'],
-	groups: ['file'],
+	localTypes: ['file'],
+	group: 'relational',
 	relational: true,
 	options: [
 		{
@@ -20,10 +22,8 @@ export default defineInterface({
 				interface: 'system-folder',
 				note: '$t:interfaces.system-folder.field_hint',
 			},
-			schema: {
-				default_value: undefined,
-			},
 		},
 	],
 	recommendedDisplays: ['file'],
+	preview: PreviewSVG,
 });

@@ -1,49 +1,45 @@
 {
 	"name": "@directus/schema",
-	"version": "9.0.0-rc.95",
+	"version": "13.0.0",
 	"description": "Utility for extracting information about existing DB schema",
-	"main": "dist/index.js",
-	"types": "dist/index.d.ts",
-	"scripts": {
-		"build": "tsc --build && echo \"Built successfully\"",
-		"dev": "npm-watch build"
-	},
-	"watch": {
-		"build": {
-			"patterns": [
-				"src/*"
-			],
-			"extensions": "ts",
-			"quiet": true,
-			"silent": true
-		}
-	},
-	"repository": {
-		"type": "git",
-		"url": "git+https://github.com/directus/directus.git"
-	},
 	"keywords": [
 		"sql",
 		"knex",
 		"schema",
 		"mysql",
 		"postgresql",
+		"cockroachdb",
 		"sqlite3",
 		"javascript"
 	],
-	"author": "Rijk van Zanten <rijkvanzanten@me.com>",
-	"license": "GPL-3.0",
-	"bugs": {
-		"url": "https://github.com/directus/directus/issues"
+	"homepage": "https://directus.io",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/directus/directus.git",
+		"directory": "packages/schema"
 	},
-	"homepage": "https://github.com/directus/directus#readme",
-	"devDependencies": {
-		"npm-watch": "0.11.0",
-		"typescript": "4.4.3"
+	"funding": "https://github.com/directus/directus?sponsor=1",
+	"license": "BUSL-1.1",
+	"author": "Rijk van Zanten <rijkvanzanten@me.com>",
+	"type": "module",
+	"exports": {
+		".": "./dist/index.js",
+		"./package.json": "./package.json"
+	},
+	"main": "dist/index.js",
+	"files": [
+		"dist"
+	],
+	"scripts": {
+		"build": "tsup src/index.ts --format=esm --dts",
+		"dev": "tsup src/index.ts --format=esm --dts --watch"
 	},
 	"dependencies": {
-		"knex-schema-inspector": "1.6.2",
-		"lodash": "^4.17.21"
+		"knex": "3.1.0"
 	},
-	"gitHead": "24621f3934dc77eb23441331040ed13c676ceffd"
+	"devDependencies": {
+		"@directus/tsconfig": "3.0.0",
+		"tsup": "8.3.5",
+		"typescript": "5.7.3"
+	}
 }

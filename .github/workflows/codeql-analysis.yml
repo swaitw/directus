@@ -1,12 +1,12 @@
-name: "CodeQL"
+name: CodeQL Analysis
 
 on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+  workflow_call:
   schedule:
-    - cron: '42 23 * * 5'
+    - cron: '0 0 * * *'
+
+env:
+  NODE_OPTIONS: --max_old_space_size=6144
 
 jobs:
   analyze:
@@ -16,23 +16,39 @@ jobs:
       actions: read
       contents: read
       security-events: write
-
     strategy:
-      fail-fast: false
+      fail-fast: true
       matrix:
-        language: [ 'javascript' ]
-
+        language:
+          - javascript
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v2
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-    - name: Initialize CodeQL
-      uses: github/codeql-action/init@v1
-      with:
-        languages: ${{ matrix.language }}
-        
-    - name: Autobuild
-      uses: github/codeql-action/autobuild@v1
+      - name: Prepare
+        uses: ./.github/actions/prepare
+        with:
+          build: false
 
-    - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@v1
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          config-file: ./.github/codeql/codeql-config.yml
+
+      - name: Perform CodeQL analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          upload: false
+          output: sarif-results
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sarif-results
+          path: sarif-results
+          retention-days: 1
+
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: sarif-results/javascript.sarif

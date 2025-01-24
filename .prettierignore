@@ -1,3 +1,12 @@
-dist
-node_modules
-app/src/lang/translations/*.yaml
+dist/
+coverage/
+pnpm-lock.yaml
+.histoire/
+**/.vitepress/cache/
+/.changeset/pre.json
+/.changeset/*.md
+/app/src/lang/translations/*.yaml
+!/app/src/lang/translations/en-US.yaml
+/docs/packages/
+/api/uploads/
+/api/extensions/

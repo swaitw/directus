@@ -1,25 +1,108 @@
+<script setup lang="ts">
+import { usePageSize } from '@/composables/use-page-size';
+import { Collection } from '@/types/collections';
+import { useElementSize, useSync } from '@directus/composables';
+import type { ShowSelect } from '@directus/extensions';
+import type { Field, Filter, Item } from '@directus/types';
+import { Ref, inject, ref, watch } from 'vue';
+import { useI18n } from 'vue-i18n';
+import Card from './components/card.vue';
+import CardsHeader from './components/header.vue';
+
+defineOptions({ inheritAttrs: false });
+
+const props = withDefaults(
+	defineProps<{
+		collection: string;
+		items: Item[];
+		selection: (number | string)[];
+		selectMode: boolean;
+		readonly: boolean;
+		limit: number;
+		size: number;
+		icon: string;
+		imageFit: string;
+		isSingleRow: boolean;
+		width: number;
+		totalPages: number;
+		page: number;
+		toPage: (newPage: number) => void;
+		getLinkForItem: (item: Record<string, any>) => string | undefined;
+		fieldsInCollection: Field[];
+		selectAll: () => void;
+		resetPresetAndRefresh: () => Promise<void>;
+		sort: string[];
+		loading: boolean;
+		showSelect?: ShowSelect;
+		error?: any;
+		itemCount: number | null;
+		totalCount: number | null;
+		primaryKeyField?: Field;
+		imageSource?: string;
+		title?: string;
+		subtitle?: string;
+		info?: Collection;
+		filterUser?: Filter;
+		search?: string;
+	}>(),
+	{
+		showSelect: 'multiple',
+	},
+);
+
+const emit = defineEmits(['update:selection', 'update:limit', 'update:size', 'update:sort', 'update:width']);
+
+const { t } = useI18n();
+
+const selectionWritable = useSync(props, 'selection', emit);
+const limitWritable = useSync(props, 'limit', emit);
+const sizeWritable = useSync(props, 'size', emit);
+const sortWritable = useSync(props, 'sort', emit);
+
+const mainElement = inject<Ref<Element | undefined>>('main-element');
+
+const layoutElement = ref<HTMLElement>();
+
+const { width: innerWidth } = useElementSize(layoutElement);
+
+const { sizes: pageSizes, selected: selectedSize } = usePageSize<string>(
+	[25, 50, 100, 250, 500, 1000],
+	(value) => String(value),
+	props.limit,
+);
+
+if (limitWritable.value !== selectedSize) {
+	limitWritable.value = selectedSize;
+}
+
+watch(
+	() => props.page,
+	() => mainElement!.value?.scrollTo({ top: 0, behavior: 'smooth' }),
+);
+
+watch(innerWidth, (value) => {
+	emit('update:width', value);
+});
+</script>
+
 <template>
 	<div ref="layoutElement" class="layout-cards" :style="{ '--size': size * 40 + 'px' }">
-		<template v-if="loading || itemCount > 0">
+		<template v-if="loading || ((itemCount ?? 0) > 0 && !error)">
 			<cards-header
 				v-model:size="sizeWritable"
 				v-model:selection="selectionWritable"
 				v-model:sort="sortWritable"
 				:fields="fieldsInCollection"
+				:show-select="showSelect"
 				@select-all="selectAll"
 			/>
 
 			<div class="grid" :class="{ 'single-row': isSingleRow }">
-				<template v-if="loading">
-					<card v-for="n in 6" :key="`loader-${n}`" item-key="loading" loading />
-				</template>
-
 				<card
 					v-for="item in items"
-					v-else
-					:key="item[primaryKeyField.field]"
+					:key="item[primaryKeyField!.field]"
 					v-model="selectionWritable"
-					:item-key="primaryKeyField.field"
+					:item-key="primaryKeyField!.field"
 					:crop="imageFit === 'crop'"
 					:icon="icon"
 					:file="imageSource ? item[imageSource] : null"
@@ -51,182 +134,16 @@
 
 				<div v-if="loading === false && items.length >= 25" class="per-page">
 					<span>{{ t('per_page') }}</span>
-					<v-select
-						:model-value="`${limit}`"
-						:items="['25', '50', '100', '250', '500', '1000']"
-						inline
-						@update:model-value="limitWritable = +$event"
-					/>
+					<v-select :model-value="`${limit}`" :items="pageSizes" inline @update:model-value="limitWritable = +$event" />
 				</div>
 			</div>
 		</template>
 
-		<v-info v-else-if="error" type="danger" :title="t('unexpected_error')" icon="error" center>
-			{{ t('unexpected_error_copy') }}
-
-			<template #append>
-				<v-error :error="error" />
-
-				<v-button small class="reset-preset" @click="resetPresetAndRefresh">
-					{{ t('reset_page_preferences') }}
-				</v-button>
-			</template>
-		</v-info>
-
-		<slot v-else-if="itemCount === 0 && activeFilterCount > 0" name="no-results" />
-		<slot v-else-if="itemCount === 0" name="no-items" />
+		<slot v-else-if="error" name="error" :error="error" :reset="resetPresetAndRefresh" />
+		<slot v-else-if="itemCount === 0 && (filterUser || search)" name="no-results" />
+		<slot v-else-if="totalCount === 0" name="no-items" />
 	</div>
 </template>
-
-<script lang="ts">
-import { useI18n } from 'vue-i18n';
-import { defineComponent, watch, PropType, ref } from 'vue';
-
-import Card from './components/card.vue';
-import CardsHeader from './components/header.vue';
-import useElementSize from '@/composables/use-element-size';
-import { Field, Item } from '@directus/shared/types';
-import { useSync } from '@directus/shared/composables';
-import { Collection } from '@directus/shared/types';
-
-export default defineComponent({
-	components: { Card, CardsHeader },
-	inheritAttrs: false,
-	props: {
-		collection: {
-			type: String,
-			required: true,
-		},
-		selection: {
-			type: Array as PropType<Item[]>,
-			required: true,
-		},
-		selectMode: {
-			type: Boolean,
-			required: true,
-		},
-		readonly: {
-			type: Boolean,
-			required: true,
-		},
-		items: {
-			type: Array as PropType<Item[]>,
-			required: true,
-		},
-		loading: {
-			type: Boolean,
-			required: true,
-		},
-		error: {
-			type: Object as PropType<any>,
-			default: null,
-		},
-		totalPages: {
-			type: Number,
-			required: true,
-		},
-		page: {
-			type: Number,
-			required: true,
-		},
-		toPage: {
-			type: Function as PropType<(newPage: number) => void>,
-			required: true,
-		},
-		itemCount: {
-			type: Number,
-			default: null,
-		},
-		fieldsInCollection: {
-			type: Array as PropType<Item[]>,
-			required: true,
-		},
-		limit: {
-			type: Number,
-			required: true,
-		},
-		size: {
-			type: Number,
-			required: true,
-		},
-		primaryKeyField: {
-			type: Object as PropType<Field>,
-			default: null,
-		},
-		icon: {
-			type: String,
-			required: true,
-		},
-		imageSource: {
-			type: String,
-			default: null,
-		},
-		title: {
-			type: String,
-			default: null,
-		},
-		subtitle: {
-			type: String,
-			default: null,
-		},
-		getLinkForItem: {
-			type: Function as PropType<(item: Record<string, any>) => string | undefined>,
-			required: true,
-		},
-		imageFit: {
-			type: String,
-			required: true,
-		},
-		sort: {
-			type: String,
-			required: true,
-		},
-		info: {
-			type: Object as PropType<Collection>,
-			default: null,
-		},
-		isSingleRow: {
-			type: Boolean,
-			required: true,
-		},
-		width: {
-			type: Number,
-			required: true,
-		},
-		activeFilterCount: {
-			type: Number,
-			required: true,
-		},
-		selectAll: {
-			type: Function as PropType<() => void>,
-			required: true,
-		},
-		resetPresetAndRefresh: {
-			type: Function as PropType<() => Promise<void>>,
-			required: true,
-		},
-	},
-	emits: ['update:selection', 'update:limit', 'update:size', 'update:sort', 'update:width'],
-	setup(props, { emit }) {
-		const { t } = useI18n();
-
-		const selectionWritable = useSync(props, 'selection', emit);
-		const limitWritable = useSync(props, 'limit', emit);
-		const sizeWritable = useSync(props, 'size', emit);
-		const sortWritable = useSync(props, 'sort', emit);
-
-		const layoutElement = ref<HTMLElement>();
-
-		const { width } = useElementSize(layoutElement);
-
-		watch(width, () => {
-			emit('update:width', width.value);
-		});
-
-		return { t, selectionWritable, limitWritable, sizeWritable, sortWritable, layoutElement };
-	},
-});
-</script>
 
 <style lang="scss" scoped>
 .layout-cards {
@@ -259,7 +176,7 @@ export default defineComponent({
 		align-items: center;
 		justify-content: flex-end;
 		width: 240px;
-		color: var(--foreground-subdued);
+		color: var(--theme--foreground-subdued);
 
 		span {
 			width: auto;
@@ -267,12 +184,8 @@ export default defineComponent({
 		}
 
 		.v-select {
-			color: var(--foreground-normal);
+			color: var(--theme--foreground);
 		}
 	}
-}
-
-.reset-preset {
-	margin-top: 24px;
 }
 </style>

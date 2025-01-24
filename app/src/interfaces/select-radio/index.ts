@@ -1,4 +1,5 @@
-import { defineInterface } from '@directus/shared/utils';
+import { defineInterface } from '@directus/extensions';
+import PreviewSVG from './preview.svg?raw';
 import InterfaceSelectRadio from './select-radio.vue';
 
 export default defineInterface({
@@ -7,9 +8,11 @@ export default defineInterface({
 	description: '$t:interfaces.select-radio.description',
 	icon: 'radio_button_checked',
 	component: InterfaceSelectRadio,
-	types: ['string'],
+	types: ['string', 'integer', 'float', 'bigInteger'],
 	recommendedDisplays: ['badge'],
-	options: [
+	group: 'selection',
+	preview: PreviewSVG,
+	options: ({ field }) => [
 		{
 			field: 'choices',
 			type: 'json',
@@ -26,16 +29,18 @@ export default defineInterface({
 							name: '$t:text',
 							meta: {
 								width: 'half',
-								interface: 'input',
+								required: true,
+								interface: 'system-input-translated-string',
 							},
 						},
 						{
 							field: 'value',
-							type: 'string',
+							type: field.type,
 							name: '$t:value',
 							meta: {
 								width: 'half',
 								interface: 'input',
+								required: true,
 								options: {
 									font: 'monospace',
 								},

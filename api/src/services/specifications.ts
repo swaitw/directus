@@ -1,36 +1,35 @@
+import { useEnv } from '@directus/env';
 import formatTitle from '@directus/format-title';
-import openapi from '@directus/specs';
-import { Knex } from 'knex';
-import { cloneDeep, mergeWith } from 'lodash';
-import {
+import { spec } from '@directus/specs';
+import { isSystemCollection } from '@directus/system-data';
+import type { Accountability, FieldOverview, Permission, SchemaOverview, Type } from '@directus/types';
+import { version } from 'directus/version';
+import type { Knex } from 'knex';
+import { cloneDeep, mergeWith } from 'lodash-es';
+import type {
 	OpenAPIObject,
-	OperationObject,
 	ParameterObject,
 	PathItemObject,
 	ReferenceObject,
 	SchemaObject,
 	TagObject,
-} from 'openapi3-ts';
-// @ts-ignore
-import { version } from '../../package.json';
-import getDatabase from '../database';
-import env from '../env';
-import { AbstractServiceOptions, Collection, Permission, Relation, SchemaOverview } from '../types';
-import { Accountability, Field, Type } from '@directus/shared/types';
-import { getRelationType } from '../utils/get-relation-type';
-import { CollectionsService } from './collections';
-import { FieldsService } from './fields';
-import { GraphQLService } from './graphql';
-import { RelationsService } from './relations';
+} from 'openapi3-ts/oas30';
+import { OAS_REQUIRED_SCHEMAS } from '../constants.js';
+import getDatabase from '../database/index.js';
+import { fetchPermissions } from '../permissions/lib/fetch-permissions.js';
+import { fetchPolicies } from '../permissions/lib/fetch-policies.js';
+import { fetchAllowedFieldMap } from '../permissions/modules/fetch-allowed-field-map/fetch-allowed-field-map.js';
+import type { AbstractServiceOptions } from '../types/index.js';
+import { getRelationType } from '../utils/get-relation-type.js';
+import { reduceSchema } from '../utils/reduce-schema.js';
+import { GraphQLService } from './graphql/index.js';
+
+const env = useEnv();
 
 export class SpecificationService {
 	accountability: Accountability | null;
 	knex: Knex;
 	schema: SchemaOverview;
-
-	fieldsService: FieldsService;
-	collectionsService: CollectionsService;
-	relationsService: RelationsService;
 
 	oas: OASSpecsService;
 	graphql: GraphQLSpecsService;
@@ -40,16 +39,7 @@ export class SpecificationService {
 		this.knex = options.knex || getDatabase();
 		this.schema = options.schema;
 
-		this.fieldsService = new FieldsService(options);
-		this.collectionsService = new CollectionsService(options);
-		this.relationsService = new RelationsService(options);
-
-		this.oas = new OASSpecsService(options, {
-			fieldsService: this.fieldsService,
-			collectionsService: this.collectionsService,
-			relationsService: this.relationsService,
-		});
-
+		this.oas = new OASSpecsService(options);
 		this.graphql = new GraphQLSpecsService(options);
 	}
 }
@@ -63,40 +53,42 @@ class OASSpecsService implements SpecificationSubService {
 	knex: Knex;
 	schema: SchemaOverview;
 
-	fieldsService: FieldsService;
-	collectionsService: CollectionsService;
-	relationsService: RelationsService;
-
-	constructor(
-		options: AbstractServiceOptions,
-		{
-			fieldsService,
-			collectionsService,
-			relationsService,
-		}: {
-			fieldsService: FieldsService;
-			collectionsService: CollectionsService;
-			relationsService: RelationsService;
-		}
-	) {
+	constructor(options: AbstractServiceOptions) {
 		this.accountability = options.accountability || null;
 		this.knex = options.knex || getDatabase();
-		this.schema = options.schema;
 
-		this.fieldsService = fieldsService;
-		this.collectionsService = collectionsService;
-		this.relationsService = relationsService;
+		this.schema = options.schema;
 	}
 
-	async generate() {
-		const collections = await this.collectionsService.readByQuery();
-		const fields = await this.fieldsService.readAll();
-		const relations = (await this.relationsService.readAll()) as Relation[];
-		const permissions = this.schema.permissions;
+	async generate(host?: string) {
+		let schemaForSpec = this.schema;
+		let permissions: Permission[] = [];
 
-		const tags = await this.generateTags(collections);
+		if (this.accountability && this.accountability.admin !== true) {
+			const allowedFields = await fetchAllowedFieldMap(
+				{
+					accountability: this.accountability,
+					action: 'read',
+				},
+				{ schema: this.schema, knex: this.knex },
+			);
+
+			schemaForSpec = reduceSchema(this.schema, allowedFields);
+
+			const policies = await fetchPolicies(this.accountability, { schema: this.schema, knex: this.knex });
+
+			permissions = await fetchPermissions(
+				{ policies, accountability: this.accountability },
+				{ schema: this.schema, knex: this.knex },
+			);
+		}
+
+		const tags = await this.generateTags(schemaForSpec);
 		const paths = await this.generatePaths(permissions, tags);
-		const components = await this.generateComponents(collections, fields, relations, tags);
+		const components = await this.generateComponents(schemaForSpec, tags);
+
+		const isDefaultPublicUrl = env['PUBLIC_URL'] === '/';
+		const url = isDefaultPublicUrl && host ? host : (env['PUBLIC_URL'] as string);
 
 		const spec: OpenAPIObject = {
 			openapi: '3.0.1',
@@ -108,47 +100,58 @@ class OASSpecsService implements SpecificationSubService {
 			},
 			servers: [
 				{
-					url: env.PUBLIC_URL,
+					url,
 					description: 'Your current Directus instance.',
 				},
 			],
-			tags,
 			paths,
-			components,
 		};
+
+		if (tags) spec.tags = tags;
+		if (components) spec.components = components;
 
 		return spec;
 	}
 
-	private async generateTags(collections: Collection[]): Promise<OpenAPIObject['tags']> {
-		const systemTags = cloneDeep(openapi.tags)!;
+	private async generateTags(schema: SchemaOverview): Promise<OpenAPIObject['tags']> {
+		const systemTags = cloneDeep(spec.tags)!;
 
+		const collections = Object.values(schema.collections);
 		const tags: OpenAPIObject['tags'] = [];
 
-		// System tags that don't have an associated collection are always readable to the user
 		for (const systemTag of systemTags) {
+			// Check if necessary authentication level is given
+			if (systemTag['x-authentication'] === 'admin' && !this.accountability?.admin) continue;
+			if (systemTag['x-authentication'] === 'user' && !this.accountability?.user) continue;
+
+			// Remaining system tags that don't have an associated collection are publicly available
 			if (!systemTag['x-collection']) {
 				tags.push(systemTag);
 			}
 		}
 
 		for (const collection of collections) {
-			const isSystem = collection.collection.startsWith('directus_');
+			const isSystem = isSystemCollection(collection.collection);
 
 			// If the collection is one of the system collections, pull the tag from the static spec
 			if (isSystem) {
-				for (const tag of openapi.tags!) {
+				for (const tag of spec.tags!) {
 					if (tag['x-collection'] === collection.collection) {
 						tags.push(tag);
 						break;
 					}
 				}
 			} else {
-				tags.push({
+				const tag: TagObject = {
 					name: 'Items' + formatTitle(collection.collection).replace(/ /g, ''),
-					description: collection.meta?.note || undefined,
 					'x-collection': collection.collection,
-				});
+				};
+
+				if (collection.note) {
+					tag.description = collection.note;
+				}
+
+				tags.push(tag);
 			}
 		}
 
@@ -162,11 +165,11 @@ class OASSpecsService implements SpecificationSubService {
 		if (!tags) return paths;
 
 		for (const tag of tags) {
-			const isSystem = 'x-collection' in tag === false || tag['x-collection'].startsWith('directus_');
+			const isSystem = 'x-collection' in tag === false || isSystemCollection(tag['x-collection']);
 
 			if (isSystem) {
-				for (const [path, pathItem] of Object.entries<PathItemObject>(openapi.paths)) {
-					for (const [method, operation] of Object.entries<OperationObject>(pathItem)) {
+				for (const [path, pathItem] of Object.entries<PathItemObject>(spec.paths)) {
+					for (const [method, operation] of Object.entries(pathItem)) {
 						if (operation.tags?.includes(tag.name)) {
 							if (!paths[path]) {
 								paths[path] = {};
@@ -178,46 +181,48 @@ class OASSpecsService implements SpecificationSubService {
 								!!permissions.find(
 									(permission) =>
 										permission.collection === tag['x-collection'] &&
-										permission.action === this.getActionForMethod(method)
+										permission.action === this.getActionForMethod(method),
 								);
 
 							if (hasPermission) {
 								if ('parameters' in pathItem) {
-									paths[path][method] = {
+									paths[path]![method as keyof PathItemObject] = {
 										...operation,
 										parameters: [...(pathItem.parameters ?? []), ...(operation?.parameters ?? [])],
 									};
 								} else {
-									paths[path][method] = operation;
+									paths[path]![method as keyof PathItemObject] = operation;
 								}
 							}
 						}
 					}
 				}
 			} else {
-				const listBase = cloneDeep(openapi.paths['/items/{collection}']);
-				const detailBase = cloneDeep(openapi.paths['/items/{collection}/{id}']);
+				const listBase = cloneDeep(spec.paths['/items/{collection}']);
+				const detailBase = cloneDeep(spec.paths['/items/{collection}/{id}']);
 				const collection = tag['x-collection'];
 
-				for (const method of ['post', 'get', 'patch', 'delete']) {
+				const methods: (keyof PathItemObject)[] = ['post', 'get', 'patch', 'delete'];
+
+				for (const method of methods) {
 					const hasPermission =
 						this.accountability?.admin === true ||
 						!!permissions.find(
 							(permission) =>
-								permission.collection === collection && permission.action === this.getActionForMethod(method)
+								permission.collection === collection && permission.action === this.getActionForMethod(method),
 						);
 
 					if (hasPermission) {
 						if (!paths[`/items/${collection}`]) paths[`/items/${collection}`] = {};
 						if (!paths[`/items/${collection}/{id}`]) paths[`/items/${collection}/{id}`] = {};
 
-						if (listBase[method]) {
-							paths[`/items/${collection}`][method] = mergeWith(
+						if (listBase?.[method]) {
+							paths[`/items/${collection}`]![method] = mergeWith(
 								cloneDeep(listBase[method]),
 								{
 									description: listBase[method].description.replace('item', collection + ' item'),
 									tags: [tag.name],
-									parameters: 'parameters' in listBase ? this.filterCollectionFromParams(listBase['parameters']) : [],
+									parameters: 'parameters' in listBase ? this.filterCollectionFromParams(listBase.parameters) : [],
 									operationId: `${this.getActionForMethod(method)}${tag.name}`,
 									requestBody: ['get', 'delete'].includes(method)
 										? undefined
@@ -242,6 +247,7 @@ class OASSpecsService implements SpecificationSubService {
 										  },
 									responses: {
 										'200': {
+											description: 'Successful request',
 											content:
 												method === 'delete'
 													? undefined
@@ -263,19 +269,19 @@ class OASSpecsService implements SpecificationSubService {
 								},
 								(obj, src) => {
 									if (Array.isArray(obj)) return obj.concat(src);
-								}
+									return undefined;
+								},
 							);
 						}
 
-						if (detailBase[method]) {
-							paths[`/items/${collection}/{id}`][method] = mergeWith(
+						if (detailBase?.[method]) {
+							paths[`/items/${collection}/{id}`]![method] = mergeWith(
 								cloneDeep(detailBase[method]),
 								{
 									description: detailBase[method].description.replace('item', collection + ' item'),
 									tags: [tag.name],
 									operationId: `${this.getActionForMethod(method)}Single${tag.name}`,
-									parameters:
-										'parameters' in detailBase ? this.filterCollectionFromParams(detailBase['parameters']) : [],
+									parameters: 'parameters' in detailBase ? this.filterCollectionFromParams(detailBase.parameters) : [],
 									requestBody: ['get', 'delete'].includes(method)
 										? undefined
 										: {
@@ -297,9 +303,7 @@ class OASSpecsService implements SpecificationSubService {
 																schema: {
 																	properties: {
 																		data: {
-																			items: {
-																				$ref: `#/components/schemas/${tag.name}`,
-																			},
+																			$ref: `#/components/schemas/${tag.name}`,
 																		},
 																	},
 																},
@@ -310,7 +314,8 @@ class OASSpecsService implements SpecificationSubService {
 								},
 								(obj, src) => {
 									if (Array.isArray(obj)) return obj.concat(src);
-								}
+									return undefined;
+								},
 							);
 						}
 					}
@@ -322,38 +327,57 @@ class OASSpecsService implements SpecificationSubService {
 	}
 
 	private async generateComponents(
-		collections: Collection[],
-		fields: Field[],
-		relations: Relation[],
-		tags: OpenAPIObject['tags']
+		schema: SchemaOverview,
+		tags: OpenAPIObject['tags'],
 	): Promise<OpenAPIObject['components']> {
-		let components: OpenAPIObject['components'] = cloneDeep(openapi.components);
+		if (!tags) return;
+
+		let components: OpenAPIObject['components'] = cloneDeep(spec.components);
 
 		if (!components) components = {};
 
 		components.schemas = {};
 
-		if (!tags) return;
+		const tagSchemas = tags.reduce(
+			(schemas, tag) => [...schemas, ...(tag['x-schemas'] ? tag['x-schemas'] : [])],
+			[] as string[],
+		);
+
+		const requiredSchemas = [...OAS_REQUIRED_SCHEMAS, ...tagSchemas];
+
+		for (const [name, schema] of Object.entries(spec.components?.schemas ?? {})) {
+			if (requiredSchemas.includes(name)) {
+				const collection = spec.tags?.find((tag) => tag.name === name)?.['x-collection'];
+
+				components.schemas[name] = {
+					...cloneDeep(schema),
+					...(collection && { 'x-collection': collection }),
+				};
+			}
+		}
+
+		const collections = Object.values(schema.collections);
 
 		for (const collection of collections) {
 			const tag = tags.find((tag) => tag['x-collection'] === collection.collection);
 
 			if (!tag) continue;
 
-			const isSystem = collection.collection.startsWith('directus_');
+			const isSystem = isSystemCollection(collection.collection);
 
-			const fieldsInCollection = fields.filter((field) => field.collection === collection.collection);
+			const fieldsInCollection = Object.values(collection.fields);
 
 			if (isSystem) {
-				const schemaComponent: SchemaObject = cloneDeep(openapi.components!.schemas![tag.name]);
+				const schemaComponent = cloneDeep(spec.components!.schemas![tag.name]) as SchemaObject;
 
 				schemaComponent.properties = {};
+				schemaComponent['x-collection'] = collection.collection;
 
 				for (const field of fieldsInCollection) {
 					schemaComponent.properties[field.field] =
 						(cloneDeep(
-							(openapi.components!.schemas![tag.name] as SchemaObject).properties![field.field]
-						) as SchemaObject) || this.generateField(field, relations, tags, fields);
+							(spec.components!.schemas![tag.name] as SchemaObject).properties![field.field],
+						) as SchemaObject) || this.generateField(schema, collection.collection, field, tags);
 				}
 
 				components.schemas[tag.name] = schemaComponent;
@@ -364,8 +388,22 @@ class OASSpecsService implements SpecificationSubService {
 					'x-collection': collection.collection,
 				};
 
+				// Track required fields
+				const requiredFields: string[] = [];
+
 				for (const field of fieldsInCollection) {
-					schemaComponent.properties![field.field] = this.generateField(field, relations, tags, fields);
+					const fieldSchema = this.generateField(schema, collection.collection, field, tags);
+					schemaComponent.properties![field.field] = fieldSchema;
+
+					// Check if field is required
+					if (field.nullable === false && field.defaultValue === null && field.generated === false) {
+						requiredFields.push(field.field);
+					}
+				}
+
+				// Only add required if there are actually required fields
+				if (requiredFields.length > 0) {
+					schemaComponent.required = requiredFields;
 				}
 
 				components.schemas[tag.name] = schemaComponent;
@@ -376,9 +414,9 @@ class OASSpecsService implements SpecificationSubService {
 	}
 
 	private filterCollectionFromParams(
-		parameters: (ParameterObject | ReferenceObject)[]
+		parameters: (ParameterObject | ReferenceObject)[],
 	): (ParameterObject | ReferenceObject)[] {
-		return parameters.filter((param) => param?.$ref !== '#/components/parameters/Collection');
+		return parameters.filter((param) => (param as ReferenceObject)?.$ref !== '#/components/parameters/Collection');
 	}
 
 	private getActionForMethod(method: string): 'create' | 'read' | 'update' | 'delete' {
@@ -395,16 +433,24 @@ class OASSpecsService implements SpecificationSubService {
 		}
 	}
 
-	private generateField(field: Field, relations: Relation[], tags: TagObject[], fields: Field[]): SchemaObject {
-		let propertyObject: SchemaObject = {
-			nullable: field.schema?.is_nullable,
-			description: field.meta?.note || undefined,
-		};
+	private generateField(
+		schema: SchemaOverview,
+		collection: string,
+		field: FieldOverview,
+		tags: TagObject[],
+	): SchemaObject {
+		let propertyObject: SchemaObject = {};
 
-		const relation = relations.find(
+		propertyObject.nullable = field.nullable;
+
+		if (field.note) {
+			propertyObject.description = field.note;
+		}
+
+		const relation = schema.relations.find(
 			(relation) =>
-				(relation.collection === field.collection && relation.field === field.field) ||
-				(relation.related_collection === field.collection && relation.meta?.one_field === field.field)
+				(relation.collection === collection && relation.field === field.field) ||
+				(relation.related_collection === collection && relation.meta?.one_field === field.field),
 		);
 
 		if (!relation) {
@@ -416,16 +462,22 @@ class OASSpecsService implements SpecificationSubService {
 			const relationType = getRelationType({
 				relation,
 				field: field.field,
-				collection: field.collection,
+				collection: collection,
 			});
 
 			if (relationType === 'm2o') {
 				const relatedTag = tags.find((tag) => tag['x-collection'] === relation.related_collection);
-				const relatedPrimaryKeyField = fields.find(
-					(field) => field.collection === relation.related_collection && field.schema?.is_primary_key
-				);
 
-				if (!relatedTag || !relatedPrimaryKeyField) return propertyObject;
+				if (
+					!relatedTag ||
+					!relation.related_collection ||
+					relation.related_collection in schema.collections === false
+				) {
+					return propertyObject;
+				}
+
+				const relatedCollection = schema.collections[relation.related_collection]!;
+				const relatedPrimaryKeyField = relatedCollection.fields[relatedCollection.primary]!;
 
 				propertyObject.oneOf = [
 					{
@@ -437,13 +489,18 @@ class OASSpecsService implements SpecificationSubService {
 				];
 			} else if (relationType === 'o2m') {
 				const relatedTag = tags.find((tag) => tag['x-collection'] === relation.collection);
-				const relatedPrimaryKeyField = fields.find(
-					(field) => field.collection === relation.collection && field.schema?.is_primary_key
-				);
+
+				if (!relatedTag || !relation.related_collection || relation.collection in schema.collections === false) {
+					return propertyObject;
+				}
+
+				const relatedCollection = schema.collections[relation.collection]!;
+				const relatedPrimaryKeyField = relatedCollection.fields[relatedCollection.primary]!;
 
 				if (!relatedTag || !relatedPrimaryKeyField) return propertyObject;
 
 				propertyObject.type = 'array';
+
 				propertyObject.items = {
 					oneOf: [
 						{
@@ -454,18 +511,19 @@ class OASSpecsService implements SpecificationSubService {
 						},
 					],
 				};
-			} else if (relationType === 'm2a') {
+			} else if (relationType === 'a2o') {
 				const relatedTags = tags.filter((tag) => relation.meta!.one_allowed_collections!.includes(tag['x-collection']));
 
 				propertyObject.type = 'array';
+
 				propertyObject.items = {
 					oneOf: [
 						{
 							type: 'string',
 						},
-						relatedTags.map((tag) => ({
+						...(relatedTags.map((tag) => ({
 							$ref: `#/components/schemas/${tag.name}`,
-						})),
+						})) as any),
 					],
 				};
 			}
@@ -474,14 +532,7 @@ class OASSpecsService implements SpecificationSubService {
 		return propertyObject;
 	}
 
-	private fieldTypes: Record<
-		Type,
-		{
-			type: 'string' | 'number' | 'boolean' | 'object' | 'array' | 'integer' | 'null' | undefined;
-			format?: string;
-			items?: any;
-		}
-	> = {
+	private fieldTypes: Record<Type, Partial<SchemaObject>> = {
 		alias: {
 			type: 'string',
 		},
@@ -523,12 +574,7 @@ class OASSpecsService implements SpecificationSubService {
 		integer: {
 			type: 'integer',
 		},
-		json: {
-			type: 'array',
-			items: {
-				type: 'string',
-			},
-		},
+		json: {},
 		string: {
 			type: 'string',
 		},
@@ -543,15 +589,31 @@ class OASSpecsService implements SpecificationSubService {
 			type: 'string',
 			format: 'timestamp',
 		},
-		unknown: {
-			type: undefined,
-		},
+		unknown: {},
 		uuid: {
 			type: 'string',
 			format: 'uuid',
 		},
 		geometry: {
-			type: 'string',
+			type: 'object',
+		},
+		'geometry.Point': {
+			type: 'object',
+		},
+		'geometry.LineString': {
+			type: 'object',
+		},
+		'geometry.Polygon': {
+			type: 'object',
+		},
+		'geometry.MultiPoint': {
+			type: 'object',
+		},
+		'geometry.MultiLineString': {
+			type: 'object',
+		},
+		'geometry.MultiPolygon': {
+			type: 'object',
 		},
 	};
 }

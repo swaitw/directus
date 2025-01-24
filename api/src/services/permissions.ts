@@ -1,89 +1,182 @@
-import { appAccessMinimalPermissions } from '../database/system-data/app-access-permissions';
-import logger from '../logger';
-import { ItemsService, QueryOptions } from '../services/items';
-import { AbstractServiceOptions, Item, PermissionsAction, PrimaryKey, Query } from '../types';
-import { filterItems } from '../utils/filter-items';
+import { ForbiddenError } from '@directus/errors';
+import type { Item, ItemPermissions, Permission, PrimaryKey, Query } from '@directus/types';
+import { uniq } from 'lodash-es';
+import { clearSystemCache } from '../cache.js';
+import { fetchPermissions } from '../permissions/lib/fetch-permissions.js';
+import { fetchPolicies } from '../permissions/lib/fetch-policies.js';
+import { withAppMinimalPermissions } from '../permissions/lib/with-app-minimal-permissions.js';
+import type { ValidateAccessOptions } from '../permissions/modules/validate-access/validate-access.js';
+import { validateAccess } from '../permissions/modules/validate-access/validate-access.js';
+import type { AbstractServiceOptions, MutationOptions } from '../types/index.js';
+import type { QueryOptions } from './items.js';
+import { ItemsService } from './items.js';
 
 export class PermissionsService extends ItemsService {
 	constructor(options: AbstractServiceOptions) {
 		super('directus_permissions', options);
 	}
 
-	getAllowedFields(action: PermissionsAction, collection?: string): Record<string, string[]> {
-		const results = this.schema.permissions.filter((permission) => {
-			let matchesCollection = true;
+	private async clearCaches(opts?: MutationOptions) {
+		await clearSystemCache({ autoPurgeCache: opts?.autoPurgeCache });
 
-			if (collection) {
-				matchesCollection = permission.collection === collection;
+		if (this.cache && opts?.autoPurgeCache !== false) {
+			await this.cache.clear();
+		}
+	}
+
+	override async readByQuery(query: Query, opts?: QueryOptions): Promise<Partial<Item>[]> {
+		const result = (await super.readByQuery(query, opts)) as Permission[];
+
+		return withAppMinimalPermissions(this.accountability, result, query.filter);
+	}
+
+	override async createOne(data: Partial<Item>, opts?: MutationOptions) {
+		const res = await super.createOne(data, opts);
+
+		await this.clearCaches(opts);
+
+		return res;
+	}
+
+	override async createMany(data: Partial<Item>[], opts?: MutationOptions) {
+		const res = await super.createMany(data, opts);
+
+		await this.clearCaches(opts);
+
+		return res;
+	}
+
+	override async updateBatch(data: Partial<Item>[], opts?: MutationOptions) {
+		const res = await super.updateBatch(data, opts);
+
+		await this.clearCaches(opts);
+
+		return res;
+	}
+
+	override async updateMany(keys: PrimaryKey[], data: Partial<Item>, opts?: MutationOptions) {
+		const res = await super.updateMany(keys, data, opts);
+
+		await this.clearCaches(opts);
+
+		return res;
+	}
+
+	override async upsertMany(payloads: Partial<Item>[], opts?: MutationOptions) {
+		const res = await super.upsertMany(payloads, opts);
+
+		await this.clearCaches(opts);
+
+		return res;
+	}
+
+	override async deleteMany(keys: PrimaryKey[], opts?: MutationOptions) {
+		const res = await super.deleteMany(keys, opts);
+
+		await this.clearCaches(opts);
+
+		return res;
+	}
+
+	async getItemPermissions(collection: string, primaryKey?: string): Promise<ItemPermissions> {
+		if (!this.accountability?.user) throw new ForbiddenError();
+
+		if (this.accountability?.admin) {
+			return {
+				update: { access: true },
+				delete: { access: true },
+				share: { access: true },
+			};
+		}
+
+		const itemPermissions: ItemPermissions = {
+			update: { access: false },
+			delete: { access: false },
+			share: { access: false },
+		};
+
+		let updateAction: 'update' | 'create' = 'update';
+
+		const schema = this.schema.collections[collection];
+
+		if (schema?.singleton) {
+			const itemsService = new ItemsService(collection, {
+				knex: this.knex,
+				schema: this.schema,
+			});
+
+			const query: Query = {
+				fields: [schema.primary],
+				limit: 1,
+			};
+
+			try {
+				const result = await itemsService.readByQuery(query);
+				if (!result[0]) updateAction = 'create';
+			} catch {
+				updateAction = 'create';
 			}
-
-			const matchesAction = permission.action === action;
-
-			return collection ? matchesCollection && matchesAction : matchesAction;
-		});
-
-		const fieldsPerCollection: Record<string, string[]> = {};
-
-		for (const result of results) {
-			const { collection, fields } = result;
-			if (!fieldsPerCollection[collection]) fieldsPerCollection[collection] = [];
-			fieldsPerCollection[collection].push(...(fields ?? []));
 		}
 
-		return fieldsPerCollection;
-	}
+		await Promise.all(
+			Object.keys(itemPermissions).map((key) => {
+				const action = key as keyof ItemPermissions;
+				const checkAction = action === 'update' ? updateAction : action;
 
-	async readByQuery(query: Query, opts?: QueryOptions): Promise<Partial<Item>[]> {
-		const result = await super.readByQuery(query, opts);
+				if (!this.accountability) {
+					itemPermissions[action].access = true;
+					return Promise.resolve();
+				}
 
-		if (Array.isArray(result) && this.accountability && this.accountability.app === true) {
-			result.push(
-				...filterItems(
-					appAccessMinimalPermissions.map((permission) => ({
-						...permission,
-						role: this.accountability!.role,
-					})),
-					query.filter
-				)
-			);
-		}
+				const opts: ValidateAccessOptions = {
+					accountability: this.accountability,
+					action: checkAction,
+					collection,
+				};
 
-		return result;
-	}
+				if (primaryKey) {
+					opts.primaryKeys = [primaryKey];
+				}
 
-	async readMany(keys: PrimaryKey[], query: Query = {}, opts?: QueryOptions): Promise<Partial<Item>[]> {
-		const result = await super.readMany(keys, query, opts);
-
-		if (this.accountability && this.accountability.app === true) {
-			result.push(
-				...filterItems(
-					appAccessMinimalPermissions.map((permission) => ({
-						...permission,
-						role: this.accountability!.role,
-					})),
-					query.filter
-				)
-			);
-		}
-
-		return result;
-	}
-
-	/**
-	 * @deprecated Use `readOne` or `readMany` instead
-	 */
-	readByKey(keys: PrimaryKey[], query?: Query, action?: PermissionsAction): Promise<null | Partial<Item>[]>;
-	readByKey(key: PrimaryKey, query?: Query, action?: PermissionsAction): Promise<null | Partial<Item>>;
-	async readByKey(
-		key: PrimaryKey | PrimaryKey[],
-		query: Query = {},
-		action: PermissionsAction = 'read'
-	): Promise<null | Partial<Item> | Partial<Item>[]> {
-		logger.warn(
-			'PermissionsService.readByKey is deprecated and will be removed before v9.0.0. Use readOne or readMany instead.'
+				return validateAccess(opts, {
+					schema: this.schema,
+					knex: this.knex,
+				})
+					.then(() => (itemPermissions[action].access = true))
+					.catch(() => {});
+			}),
 		);
 
-		if (Array.isArray(key)) return await this.readMany(key, query, { permissionsAction: action });
-		return await this.readOne(key, query, { permissionsAction: action });
+		if (schema?.singleton && itemPermissions.update.access) {
+			const context = { schema: this.schema, knex: this.knex };
+			const policies = await fetchPolicies(this.accountability, context);
+
+			const permissions = await fetchPermissions(
+				{ policies, accountability: this.accountability, action: updateAction, collections: [collection] },
+				context,
+			);
+
+			let fields: string[] = [];
+			let presets = {};
+
+			for (const permission of permissions) {
+				if (permission.fields && fields[0] !== '*') {
+					fields = uniq([...fields, ...permission.fields]);
+
+					if (fields.includes('*')) {
+						fields = ['*'];
+					}
+				}
+
+				if (permission.presets) {
+					presets = { ...(presets ?? {}), ...permission.presets };
+				}
+			}
+
+			itemPermissions.update.fields = fields;
+			itemPermissions.update.presets = presets;
+		}
+
+		return itemPermissions;
 	}
 }

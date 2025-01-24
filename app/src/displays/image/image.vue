@@ -1,6 +1,29 @@
+<script setup lang="ts">
+import { getAssetUrl } from '@/utils/get-asset-url';
+import { computed, ref } from 'vue';
+
+type Image = {
+	id: string;
+	type: string;
+	title: string;
+};
+
+const props = defineProps<{
+	value: Image | null;
+	circle?: boolean;
+}>();
+
+const imageError = ref(false);
+
+const src = computed(() => {
+	if (props.value?.id === null || props.value?.id === undefined) return null;
+	return getAssetUrl(`${props.value.id}?key=system-small-cover`);
+});
+</script>
+
 <template>
 	<v-icon v-if="imageError" name="image" />
-	<img
+	<v-image
 		v-else-if="src"
 		:src="src"
 		role="presentation"
@@ -11,54 +34,17 @@
 	<value-null v-else />
 </template>
 
-<script lang="ts">
-import { defineComponent, PropType, computed, ref } from 'vue';
-import ValueNull from '@/views/private/components/value-null';
-import { getRootPath } from '@/utils/get-root-path';
-import { addTokenToURL } from '@/api';
-
-type Image = {
-	id: string;
-	type: string;
-	title: string;
-};
-
-export default defineComponent({
-	components: { ValueNull },
-	props: {
-		value: {
-			type: Object as PropType<Image>,
-			default: null,
-		},
-		circle: {
-			type: Boolean,
-			default: false,
-		},
-	},
-	setup(props) {
-		const imageError = ref(false);
-
-		const src = computed(() => {
-			if (props.value === null) return null;
-			const url = getRootPath() + `assets/${props.value.id}?key=system-small-cover`;
-			return addTokenToURL(url);
-		});
-
-		return { src, imageError };
-	},
-});
-</script>
-
 <style lang="scss" scoped>
 img {
 	display: inline-block;
 	width: auto;
 	height: 100%;
 	vertical-align: -30%;
-	border-radius: var(--border-radius);
+	border-radius: var(--theme--border-radius);
 
 	&.circle {
 		border-radius: 100%;
+		aspect-ratio: 1;
 	}
 }
 </style>

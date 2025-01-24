@@ -1,30 +1,35 @@
-import { RequestHandler } from 'express';
-import { getCache } from '../cache';
-import env from '../env';
-import asyncHandler from '../utils/async-handler';
-import { getCacheControlHeader } from '../utils/get-cache-headers';
-import { getCacheKey } from '../utils/get-cache-key';
-import logger from '../logger';
+import { useEnv } from '@directus/env';
+import type { RequestHandler } from 'express';
+import { getCache, getCacheValue } from '../cache.js';
+import { useLogger } from '../logger/index.js';
+import asyncHandler from '../utils/async-handler.js';
+import { getCacheControlHeader } from '../utils/get-cache-headers.js';
+import { getCacheKey } from '../utils/get-cache-key.js';
+import { shouldSkipCache } from '../utils/should-skip-cache.js';
 
 const checkCacheMiddleware: RequestHandler = asyncHandler(async (req, res, next) => {
+	const env = useEnv();
 	const { cache } = getCache();
+	const logger = useLogger();
 
-	if (req.method.toLowerCase() !== 'get') return next();
-	if (env.CACHE_ENABLED !== true) return next();
+	if (req.method.toLowerCase() !== 'get' && req.originalUrl?.startsWith('/graphql') === false) return next();
+	if (env['CACHE_ENABLED'] !== true) return next();
 	if (!cache) return next();
 
-	if (req.headers['cache-control']?.includes('no-store') || req.headers['Cache-Control']?.includes('no-store')) {
+	if (shouldSkipCache(req)) {
+		if (env['CACHE_STATUS_HEADER']) res.setHeader(`${env['CACHE_STATUS_HEADER']}`, 'MISS');
 		return next();
 	}
 
-	const key = getCacheKey(req);
+	const key = await getCacheKey(req);
 
 	let cachedData;
 
 	try {
-		cachedData = await cache.get(key);
+		cachedData = await getCacheValue(cache, key);
 	} catch (err: any) {
 		logger.warn(err, `[cache] Couldn't read key ${key}. ${err.message}`);
+		if (env['CACHE_STATUS_HEADER']) res.setHeader(`${env['CACHE_STATUS_HEADER']}`, 'MISS');
 		return next();
 	}
 
@@ -32,19 +37,22 @@ const checkCacheMiddleware: RequestHandler = asyncHandler(async (req, res, next)
 		let cacheExpiryDate;
 
 		try {
-			cacheExpiryDate = (await cache.get(`${key}__expires_at`)) as number | null;
+			cacheExpiryDate = (await getCacheValue(cache, `${key}__expires_at`))?.exp;
 		} catch (err: any) {
 			logger.warn(err, `[cache] Couldn't read key ${`${key}__expires_at`}. ${err.message}`);
+			if (env['CACHE_STATUS_HEADER']) res.setHeader(`${env['CACHE_STATUS_HEADER']}`, 'MISS');
 			return next();
 		}
 
-		const cacheTTL = cacheExpiryDate ? cacheExpiryDate - Date.now() : null;
+		const cacheTTL = cacheExpiryDate ? cacheExpiryDate - Date.now() : undefined;
 
-		res.setHeader('Cache-Control', getCacheControlHeader(req, cacheTTL));
+		res.setHeader('Cache-Control', getCacheControlHeader(req, cacheTTL, true, true));
 		res.setHeader('Vary', 'Origin, Cache-Control');
+		if (env['CACHE_STATUS_HEADER']) res.setHeader(`${env['CACHE_STATUS_HEADER']}`, 'HIT');
 
 		return res.json(cachedData);
 	} else {
+		if (env['CACHE_STATUS_HEADER']) res.setHeader(`${env['CACHE_STATUS_HEADER']}`, 'MISS');
 		return next();
 	}
 });
