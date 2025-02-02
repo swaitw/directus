@@ -1,21 +1,25 @@
-import {
-	GraphQLBoolean,
-	GraphQLFloat,
-	GraphQLInt,
-	GraphQLScalarType,
-	GraphQLString,
-	GraphQLList,
-	GraphQLType,
-} from 'graphql';
+import type { Type } from '@directus/types';
+import type { GraphQLType } from 'graphql';
+import { GraphQLBoolean, GraphQLFloat, GraphQLInt, GraphQLList, GraphQLScalarType, GraphQLString } from 'graphql';
 import { GraphQLJSON } from 'graphql-compose';
-import { GraphQLDate, GraphQLGeoJSON } from '../services/graphql';
-import { Type } from '@directus/shared/types';
+import { GraphQLBigInt } from '../services/graphql/types/bigint.js';
+import { GraphQLDate } from '../services/graphql/types/date.js';
+import { GraphQLGeoJSON } from '../services/graphql/types/geojson.js';
+import { GraphQLHash } from '../services/graphql/types/hash.js';
 
-export function getGraphQLType(localType: Type | 'alias' | 'unknown'): GraphQLScalarType | GraphQLList<GraphQLType> {
+export function getGraphQLType(
+	localType: Type | 'alias' | 'unknown',
+	special: string[],
+): GraphQLScalarType | GraphQLList<GraphQLType> {
+	if (special.includes('conceal')) {
+		return GraphQLHash;
+	}
+
 	switch (localType) {
 		case 'boolean':
 			return GraphQLBoolean;
 		case 'bigInteger':
+			return GraphQLBigInt;
 		case 'integer':
 			return GraphQLInt;
 		case 'decimal':
@@ -27,10 +31,13 @@ export function getGraphQLType(localType: Type | 'alias' | 'unknown'): GraphQLSc
 			return GraphQLJSON;
 		case 'geometry':
 			return GraphQLGeoJSON;
+		case 'time':
 		case 'timestamp':
 		case 'dateTime':
 		case 'date':
 			return GraphQLDate;
+		case 'hash':
+			return GraphQLHash;
 		default:
 			return GraphQLString;
 	}

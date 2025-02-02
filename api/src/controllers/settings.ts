@@ -1,9 +1,10 @@
+import { isDirectusError } from '@directus/errors';
 import express from 'express';
-import { ForbiddenException } from '../exceptions';
-import { respond } from '../middleware/respond';
-import useCollection from '../middleware/use-collection';
-import { SettingsService } from '../services';
-import asyncHandler from '../utils/async-handler';
+import { ErrorCode } from '@directus/errors';
+import { respond } from '../middleware/respond.js';
+import useCollection from '../middleware/use-collection.js';
+import { SettingsService } from '../services/settings.js';
+import asyncHandler from '../utils/async-handler.js';
 
 const router = express.Router();
 
@@ -16,11 +17,12 @@ router.get(
 			accountability: req.accountability,
 			schema: req.schema,
 		});
+
 		const records = await service.readSingleton(req.sanitizedQuery);
-		res.locals.payload = { data: records || null };
+		res.locals['payload'] = { data: records || null };
 		return next();
 	}),
-	respond
+	respond,
 );
 
 router.patch(
@@ -30,13 +32,14 @@ router.patch(
 			accountability: req.accountability,
 			schema: req.schema,
 		});
+
 		await service.upsertSingleton(req.body);
 
 		try {
 			const record = await service.readSingleton(req.sanitizedQuery);
-			res.locals.payload = { data: record || null };
+			res.locals['payload'] = { data: record || null };
 		} catch (error: any) {
-			if (error instanceof ForbiddenException) {
+			if (isDirectusError(error, ErrorCode.Forbidden)) {
 				return next();
 			}
 
@@ -45,7 +48,7 @@ router.patch(
 
 		return next();
 	}),
-	respond
+	respond,
 );
 
 export default router;

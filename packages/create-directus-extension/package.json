@@ -1,26 +1,40 @@
 {
 	"name": "create-directus-extension",
-	"version": "9.0.0-rc.95",
-	"description": "A small util that will scaffold a Directus extension.",
-	"main": "lib/index.js",
-	"bin": {
-		"create-directus-extension": "./lib/index.js",
-		"cde": "./lib/index.js"
-	},
+	"version": "11.0.8",
+	"description": "A small util that will scaffold a Directus extension",
 	"keywords": [
 		"directus",
 		"extensions"
 	],
+	"homepage": "https://directus.io",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/directus/directus.git",
+		"directory": "packages/create-directus-extension"
+	},
+	"funding": "https://github.com/directus/directus?sponsor=1",
+	"license": "MIT",
 	"author": "Nicola Krumschmidt",
 	"contributors": [
 		"Joonas Palosuo <joonas.palosuo@gmail.com>",
 		"Rijk van Zanten <rijkvanzanten@me.com>"
 	],
-	"license": "GPL-3.0-only",
-	"gitHead": "24621f3934dc77eb23441331040ed13c676ceffd",
+	"type": "module",
+	"exports": {
+		".": "./lib/index.js",
+		"./package.json": "./package.json"
+	},
+	"main": "lib/index.js",
+	"bin": {
+		"cde": "./lib/index.js",
+		"create-directus-extension": "./lib/index.js"
+	},
+	"files": [
+		"lib/index.js"
+	],
 	"dependencies": {
-		"@directus/extensions-sdk": "9.0.0-rc.95",
-		"@directus/shared": "9.0.0-rc.95",
-		"inquirer": "^8.1.2"
+		"@directus/extensions": "workspace:*",
+		"@directus/extensions-sdk": "workspace:*",
+		"inquirer": "12.3.0"
 	}
 }

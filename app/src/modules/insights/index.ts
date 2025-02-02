@@ -1,7 +1,8 @@
 import InsightsOverview from './routes/overview.vue';
 import InsightsDashboard from './routes/dashboard.vue';
 import InsightsPanelConfiguration from './routes/panel-configuration.vue';
-import { defineModule } from '@directus/shared/utils';
+import { defineModule } from '@directus/extensions';
+import { useInsightsStore } from '@/stores/insights';
 
 export default defineModule({
 	id: 'insights',
@@ -18,11 +19,19 @@ export default defineModule({
 			path: ':primaryKey',
 			component: InsightsDashboard,
 			props: true,
+			beforeEnter(to) {
+				const store = useInsightsStore();
+				// Refresh is async, but we'll let the view load while the data is being fetched
+				store.refresh(to.params.primaryKey as string);
+			},
 			children: [
 				{
 					name: 'panel-detail',
 					path: ':panelKey',
 					props: true,
+					meta: {
+						isFloatingView: true,
+					},
 					components: {
 						detail: InsightsPanelConfiguration,
 					},
@@ -31,14 +40,11 @@ export default defineModule({
 		},
 	],
 	preRegisterCheck(user, permissions) {
-		const admin = user.role.admin_access;
+		const admin = user.admin_access;
 
 		if (admin) return true;
 
-		const permission = permissions.find(
-			(permission) => permission.collection === 'directus_dashboards' && permission.action === 'read'
-		);
-
-		return !!permission;
+		const access = permissions['directus_dashboards']?.['read']?.access;
+		return access === 'partial' || access === 'full';
 	},
 });

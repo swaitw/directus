@@ -1,74 +1,125 @@
+<script setup lang="ts">
+import { AUTH_SSO_DRIVERS } from '@/constants';
+import { translateAPIError } from '@/lang';
+import { AuthProvider } from '@/types/login';
+import { getRootPath } from '@/utils/get-root-path';
+import formatTitle from '@directus/format-title';
+import { computed, ref, toRefs, watch } from 'vue';
+import { useI18n } from 'vue-i18n';
+import { useRoute } from 'vue-router';
+
+const props = defineProps<{
+	providers: AuthProvider[];
+}>();
+
+const { t } = useI18n();
+
+const route = useRoute();
+
+const { providers } = toRefs(props);
+const ssoProviders = ref<{ name: string; label: string; link: string; icon: string }[]>([]);
+
+watch(
+	providers,
+	() => {
+		ssoProviders.value = providers.value
+			.filter((provider) => AUTH_SSO_DRIVERS.includes(provider.driver))
+			.map((provider) => {
+				const ssoLoginLink = new URL(window.location.origin);
+				ssoLoginLink.pathname = `${getRootPath()}auth/login/${provider.name}`;
+
+				const redirectToLink = new URL(window.location.href);
+				redirectToLink.searchParams.set('continue', '');
+
+				ssoLoginLink.searchParams.set('redirect', redirectToLink.toString());
+
+				return {
+					name: provider.name,
+					label: provider.label || formatTitle(provider.name),
+					link: ssoLoginLink.toString(),
+					icon: provider.icon ?? 'account_circle',
+				};
+			});
+	},
+	{ immediate: true },
+);
+
+const errorFormatted = computed(() => {
+	const validReasons = ['SIGN_OUT', 'SESSION_EXPIRED'];
+
+	const reason = Array.isArray(route.query.reason) ? route.query.reason[0] : route.query.reason;
+
+	if (reason && !validReasons.includes(reason)) {
+		return translateAPIError(reason);
+	}
+
+	return null;
+});
+</script>
+
 <template>
 	<div class="sso-links">
-		<template v-if="providers && providers.length > 0">
+		<template v-if="ssoProviders.length > 0">
 			<v-divider />
 
-			<a v-for="provider in providers" :key="provider.name" class="sso-link" :href="provider.link">
-				{{ t('log_in_with', { provider: provider.name }) }}
+			<v-notice v-if="errorFormatted" type="warning">
+				{{ errorFormatted }}
+			</v-notice>
+
+			<a v-for="provider in ssoProviders" :key="provider.name" class="sso-link" :href="provider.link">
+				<div class="sso-icon">
+					<v-icon :name="provider.icon" />
+				</div>
+				<div class="sso-title">
+					<v-text-overflow :text="t('log_in_with', { provider: provider.label })" />
+				</div>
 			</a>
 		</template>
 	</div>
 </template>
-
-<script lang="ts">
-import { useI18n } from 'vue-i18n';
-import { defineComponent, ref, onMounted } from 'vue';
-import api from '@/api';
-import { getRootPath } from '@/utils/get-root-path';
-import { unexpectedError } from '@/utils/unexpected-error';
-
-export default defineComponent({
-	setup() {
-		const { t } = useI18n();
-
-		const providers = ref([]);
-		const loading = ref(false);
-
-		onMounted(() => fetchProviders());
-
-		return { t, providers };
-
-		async function fetchProviders() {
-			loading.value = true;
-
-			try {
-				const response = await api.get('/auth/oauth/');
-
-				providers.value = response.data.data?.map((providerName: string) => {
-					return {
-						name: providerName,
-						link: `${getRootPath()}auth/oauth/${providerName.toLowerCase()}?redirect=${window.location.href}`,
-					};
-				});
-			} catch (err: any) {
-				unexpectedError(err);
-			} finally {
-				loading.value = false;
-			}
-		}
-	},
-});
-</script>
 
 <style lang="scss" scoped>
 .v-divider {
 	margin: 24px 0;
 }
 
+.v-notice {
+	margin-bottom: 20px;
+}
+
 .sso-link {
-	display: block;
+	$sso-link-border-width: 2px;
+
 	display: flex;
-	align-items: center;
-	justify-content: center;
 	width: 100%;
-	height: var(--input-height);
-	text-align: center;
-	background-color: var(--background-normal);
-	border-radius: var(--border-radius);
-	transition: background var(--fast) var(--transition);
+	height: var(--theme--form--field--input--height);
+	background-color: var(--theme--background-normal);
+	border: $sso-link-border-width var(--theme--background-normal) solid;
+	border-radius: var(--theme--border-radius);
+	transition: border-color var(--fast) var(--transition);
+
+	.sso-icon {
+		--v-icon-size: 28px;
+
+		display: flex;
+		align-items: center;
+		justify-content: center;
+		width: var(--theme--form--field--input--height);
+		margin: -$sso-link-border-width;
+		background-color: var(--theme--background-accent);
+		border-radius: var(--theme--border-radius);
+	}
+
+	.sso-title {
+		display: flex;
+		align-items: center;
+		padding: 0 16px 0 20px;
+		font-size: 16px;
+		overflow: hidden;
+	}
 
 	&:hover {
-		background-color: var(--background-normal-alt);
+		border-color: var(--theme--background-accent);
 	}
 
 	& + & {

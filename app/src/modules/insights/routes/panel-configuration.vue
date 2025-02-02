@@ -1,3 +1,128 @@
+<script setup lang="ts">
+import { useDialogRoute } from '@/composables/use-dialog-route';
+import { useExtension } from '@/composables/use-extension';
+import { useExtensions } from '@/extensions';
+import { CreatePanel, useInsightsStore } from '@/stores/insights';
+import type { Panel } from '@directus/extensions';
+import { assign, clone, isUndefined, omitBy } from 'lodash';
+import { nanoid } from 'nanoid/non-secure';
+import { storeToRefs } from 'pinia';
+import { computed, reactive, unref } from 'vue';
+import { useI18n } from 'vue-i18n';
+import { useRouter } from 'vue-router';
+import ExtensionOptions from '../../settings/routes/data-model/field-detail/shared/extension-options.vue';
+
+const props = defineProps<{
+	dashboardKey: string;
+	panelKey: string;
+}>();
+
+const { t } = useI18n();
+
+const isOpen = useDialogRoute();
+
+const edits = reactive<Partial<Panel>>({
+	show_header: undefined,
+	type: undefined,
+	name: undefined,
+	note: undefined,
+	icon: undefined,
+	color: undefined,
+	width: undefined,
+	height: undefined,
+	position_x: undefined,
+	position_y: undefined,
+	options: undefined,
+});
+
+const insightsStore = useInsightsStore();
+
+const { panels } = storeToRefs(insightsStore);
+const { panels: panelTypes } = useExtensions();
+
+const router = useRouter();
+
+const panel = computed<Partial<Panel>>(() => {
+	if (props.panelKey === '+') return edits;
+	const existing: Partial<Panel> = unref(panels).find((panel) => panel.id === props.panelKey) ?? {};
+	return assign({}, existing, omitBy(edits, isUndefined));
+});
+
+const currentTypeInfo = useExtension(
+	'panel',
+	computed(() => panel.value.type ?? null),
+);
+
+const customOptionsFields = computed(() => {
+	if (typeof currentTypeInfo.value?.options === 'function') {
+		return currentTypeInfo.value.options(unref(panel)) ?? undefined;
+	}
+
+	return undefined;
+});
+
+function isSVG(path: string) {
+	return path.startsWith('<svg');
+}
+
+const configRow = computed(() => {
+	if (!panel.value.type) return null;
+
+	let indexInGroup: number | null = null;
+
+	const index = panelTypes.value.findIndex((pan) => pan.id === panel.value.type);
+	if (index !== -1) indexInGroup = index;
+
+	if (indexInGroup === null) return null;
+
+	const windowWidth = window.innerWidth;
+
+	let columns = 1;
+
+	if (windowWidth > 400) {
+		columns = 2;
+	}
+
+	if (windowWidth > 600) {
+		columns = 3;
+	}
+
+	if (windowWidth > 840) {
+		columns = 4;
+	}
+
+	return Math.ceil((indexInGroup + 1) / columns) + 1;
+});
+
+function togglePanel(id: string) {
+	if (edits.type === id) {
+		edits.type = undefined;
+	} else {
+		edits.type = id;
+	}
+}
+
+const stageChanges = () => {
+	if (props.panelKey === '+') {
+		const createPanel = clone(unref(panel));
+
+		createPanel.id = `_${nanoid()}`;
+		createPanel.dashboard = props.dashboardKey;
+		createPanel.width ??= unref(currentTypeInfo)?.minWidth ?? 4;
+		createPanel.height ??= unref(currentTypeInfo)?.minHeight ?? 4;
+		createPanel.position_x ??= 1;
+		createPanel.position_y ??= 1;
+		createPanel.options ??= {};
+
+		insightsStore.stagePanelCreate(unref(createPanel as CreatePanel));
+		router.push(`/insights/${props.dashboardKey}`);
+	} else {
+		insightsStore.stagePanelUpdate({ id: props.panelKey, edits: unref(panel) });
+		router.push(`/insights/${props.dashboardKey}`);
+	}
+};
+</script>
+
 <template>
 	<v-drawer
 		:model-value="isOpen"
@@ -5,186 +130,256 @@
 		:subtitle="t('panel_options')"
 		:icon="panel?.icon || 'insert_chart'"
 		persistent
-		@cancel="$emit('cancel')"
+		@cancel="router.push(`/insights/${dashboardKey}`)"
 	>
 		<template #actions>
-			<v-button v-tooltip.bottom="t('done')" :disabled="!edits.type" icon rounded @click="emitSave">
+			<v-button v-tooltip.bottom="t('done')" :disabled="!panel.type" icon rounded @click="stageChanges">
 				<v-icon name="check" />
 			</v-button>
 		</template>
-
 		<div class="content">
-			<p class="type-label panel-type-label">{{ t('type') }}</p>
+			<div class="panel-grid">
+				<button
+					v-for="pan of panelTypes"
+					:key="pan.id"
+					class="interface"
+					:class="{ active: panel.type === pan.id, subdued: panel.type && panel.type !== pan.id }"
+					@click="togglePanel(pan.id)"
+				>
+					<div class="preview">
+						<template v-if="pan.preview">
+							<!-- eslint-disable-next-line vue/no-v-html -->
+							<span v-if="isSVG(pan.preview)" class="svg" v-html="pan.preview" />
+							<img v-else :src="pan.preview" alt="" />
+						</template>
 
-			<v-fancy-select v-model="edits.type" class="select" :items="selectItems" />
+						<span v-else class="fallback">
+							<v-icon large :name="pan.icon" />
+						</span>
+					</div>
+					<v-text-overflow :text="pan.name" class="name" />
+				</button>
 
-			<template v-if="edits.type && selectedPanel">
-				<v-notice v-if="!selectedPanel.options || selectedPanel.options.length === 0">
-					{{ t('no_options_available') }}
-				</v-notice>
+				<transition-expand>
+					<div v-if="panel.type" class="field-configuration" :style="configRow ? { 'grid-row': configRow } : {}">
+						<div class="setup">
+							<extension-options
+								:model-value="panel.options"
+								:options="customOptionsFields"
+								type="panel"
+								:extension="panel.type"
+								raw-editor-enabled
+								style="{'grid-template-columns': 'unset'}"
+								@update:model-value="edits.options = $event"
+							/>
+							<v-divider :inline-title="false" large>
+								<template #icon><v-icon name="info" /></template>
+								<template #default>{{ t('panel_header') }}</template>
+							</v-divider>
 
-				<v-form
-					v-else-if="Array.isArray(selectedPanel.options)"
-					v-model="edits.options"
-					:fields="selectedPanel.options"
-					primary-key="+"
-					:initial-values="panel && panel.options"
-				/>
+							<div class="form-grid">
+								<div class="field half-left">
+									<p class="type-label">{{ t('visible') }}</p>
+									<v-checkbox
+										:model-value="panel.show_header"
+										block
+										:label="t('show_header')"
+										@update:model-value="edits.show_header = $event"
+									/>
+								</div>
 
-				<component :is="`panel-options-${selectedPanel.id}`" v-else v-model="edits.options" :collection="collection" />
-			</template>
+								<div class="field half-right">
+									<p class="type-label">{{ t('name') }}</p>
+									<v-input
+										:model-value="panel.name"
+										:nullable="false"
+										:disabled="panel.show_header !== true"
+										:placeholder="t('panel_name_placeholder')"
+										@update:model-value="edits.name = $event"
+									/>
+								</div>
 
-			<v-divider :inline-title="false" large>
-				<template #icon><v-icon name="info" /></template>
-				<template #default>{{ t('panel_header') }}</template>
-			</v-divider>
+								<div class="field half-left">
+									<p class="type-label">{{ t('icon') }}</p>
+									<interface-select-icon
+										:value="panel.icon"
+										:disabled="panel.show_header !== true"
+										@input="edits.icon = $event"
+									/>
+								</div>
 
-			<div class="form-grid">
-				<div class="field half-left">
-					<p class="type-label">{{ t('visible') }}</p>
-					<v-checkbox v-model="edits.show_header" block :label="t('show_header')" />
-				</div>
+								<div class="field half-right">
+									<p class="type-label">{{ t('color') }}</p>
+									<interface-select-color
+										:value="panel.color"
+										:disabled="panel.show_header !== true"
+										width="half"
+										@input="edits.color = $event"
+									/>
+								</div>
 
-				<div class="field half-right">
-					<p class="type-label">{{ t('name') }}</p>
-					<v-input
-						v-model="edits.name"
-						:nullable="false"
-						:disabled="edits.show_header !== true"
-						:placeholder="t('panel_name_placeholder')"
-					/>
-				</div>
-
-				<div class="field half-left">
-					<p class="type-label">{{ t('icon') }}</p>
-					<interface-select-icon
-						:value="edits.icon"
-						:disabled="edits.show_header !== true"
-						@input="edits.icon = $event"
-					/>
-				</div>
-
-				<div class="field half-right">
-					<p class="type-label">{{ t('color') }}</p>
-					<interface-select-color
-						:value="edits.color"
-						:disabled="edits.show_header !== true"
-						width="half"
-						@input="edits.color = $event"
-					/>
-				</div>
-
-				<div class="field full">
-					<p class="type-label">{{ t('note') }}</p>
-					<v-input
-						v-model="edits.note"
-						:disabled="edits.show_header !== true"
-						:placeholder="t('panel_note_placeholder')"
-					/>
-				</div>
+								<div class="field full">
+									<p class="type-label">{{ t('note') }}</p>
+									<v-input
+										:model-value="panel.note"
+										:disabled="panel.show_header !== true"
+										:placeholder="t('panel_note_placeholder')"
+										@update:model-value="edits.note = $event"
+									/>
+								</div>
+							</div>
+						</div>
+					</div>
+				</transition-expand>
 			</div>
 		</div>
 	</v-drawer>
 </template>
 
-<script lang="ts">
-import { computed, defineComponent, reactive, watch, PropType } from 'vue';
-import { getPanels } from '@/panels';
-import { FancySelectItem } from '@/components/v-fancy-select/types';
-import { Panel } from '@/types';
-import { useI18n } from 'vue-i18n';
-import { useDialogRoute } from '@/composables/use-dialog-route';
-
-export default defineComponent({
-	name: 'PanelConfiguration',
-	props: {
-		panel: {
-			type: Object as PropType<Partial<Panel>>,
-			default: null,
-		},
-	},
-	emits: ['cancel', 'save'],
-	setup(props, { emit }) {
-		const { t } = useI18n();
-
-		const { panels } = getPanels();
-
-		const isOpen = useDialogRoute();
-
-		const edits = reactive<Partial<Panel>>({
-			show_header: props.panel?.show_header ?? true,
-			type: props.panel?.type || undefined,
-			name: props.panel?.name,
-			note: props.panel?.note,
-			icon: props.panel?.icon ?? 'insert_chart',
-			color: props.panel?.color ?? '#00C897',
-			width: props.panel?.width ?? undefined,
-			height: props.panel?.height ?? undefined,
-			position_x: props.panel?.position_x ?? 1,
-			position_y: props.panel?.position_y ?? 1,
-			options: props.panel?.options ?? {},
-		});
-
-		const selectItems = computed<FancySelectItem[]>(() => {
-			return panels.value.map((panel) => {
-				const item: FancySelectItem = {
-					text: panel.name,
-					icon: panel.icon,
-					description: panel.description,
-					value: panel.id,
-				};
-
-				return item;
-			});
-		});
-
-		const selectedPanel = computed(() => {
-			return panels.value.find((panel) => panel.id === edits.type);
-		});
-
-		watch(selectedPanel, (newPanel) => {
-			if (newPanel) {
-				edits.width = newPanel.minWidth;
-				edits.height = newPanel.minHeight;
-			} else {
-				edits.width = undefined;
-				edits.height = undefined;
-			}
-		});
-
-		return {
-			selectItems,
-			selectedPanel,
-			close,
-			emitSave,
-			edits,
-			t,
-			isOpen,
-		};
-
-		function emitSave() {
-			emit('save', edits);
-		}
-	},
-});
-</script>
-
-<style scoped>
+<style scoped lang="scss">
 .content {
 	padding: var(--content-padding);
 	padding-top: 0;
 	padding-bottom: var(--content-padding-bottom);
 }
 
-.select {
-	margin-bottom: 32px;
-}
-
-.panel-type-label {
-	margin-bottom: 16px;
-}
-
 .v-divider {
 	margin: 68px 0 48px;
+}
+
+.group h2 {
+	margin-bottom: 40px;
+	padding-bottom: 2px;
+	font-weight: 700;
+	border-bottom: var(--theme--border-width) solid var(--theme--border-color-subdued);
+}
+
+.group + .group {
+	margin-top: 80px;
+}
+
+.panel-grid {
+	--columns: 1;
+
+	display: grid;
+	grid-template-columns: repeat(var(--columns), 1fr);
+	gap: 32px;
+
+	@media (min-width: 400px) {
+		--columns: 2;
+	}
+
+	@media (min-width: 600px) {
+		--columns: 3;
+	}
+
+	@media (min-width: 840px) {
+		--columns: 4;
+	}
+}
+
+.interface {
+	min-height: 100px;
+	overflow: hidden;
+	text-align: left;
+}
+
+.preview {
+	--v-icon-color: var(--background-page);
+
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 160px;
+	height: 100px;
+	margin-bottom: 8px;
+	border: var(--theme--border-width) solid var(--theme--border-color-subdued);
+	border-radius: var(--theme--border-radius);
+	transition: var(--fast) var(--transition);
+	transition-property: background-color, border-color;
+}
+
+.preview img {
+	width: 100%;
+	height: 100%;
+	object-fit: cover;
+}
+
+.preview .svg {
+	display: contents;
+}
+
+.preview :deep(svg) {
+	width: 100%;
+	height: 100%;
+}
+
+.preview :deep(svg) .glow {
+	filter: drop-shadow(0 0 4px var(--theme--primary-subdued));
+}
+
+.preview .fallback {
+	--v-icon-color: var(--theme--primary-75);
+
+	display: block;
+	padding: 8px 16px;
+	background-color: var(--background-page);
+	border: var(--theme--border-width) solid var(--theme--primary);
+	border-radius: var(--theme--border-radius);
+	box-shadow: 0 0 8px var(--theme--primary-75);
+}
+
+.interface:hover .preview {
+	border-color: var(--theme--form--field--input--border-color);
+}
+
+.interface.active .preview {
+	background-color: var(--theme--primary-background);
+	border-color: var(--theme--primary);
+}
+
+.interface.subdued .preview {
+	background-color: var(--theme--background-subdued);
+}
+
+.interface.subdued .preview .fallback {
+	--v-icon-color: var(--theme--foreground-subdued);
+
+	box-shadow: 0 0 8px var(--theme--foreground-subdued);
+}
+
+.field-configuration {
+	--v-button-background-color-disabled: var(--theme--background-normal);
+	--columns: 1;
+
+	grid-column: 1 / span var(--columns);
+	background-color: var(--theme--background-subdued);
+	border-top: var(--theme--border-width) solid var(--theme--form--field--input--border-color);
+	border-bottom: var(--theme--border-width) solid var(--theme--form--field--input--border-color);
+
+	@media (min-width: 400px) {
+		--columns: 2;
+	}
+
+	@media (min-width: 600px) {
+		--columns: 3;
+	}
+
+	@media (min-width: 840px) {
+		--columns: 4;
+	}
+}
+
+:deep(.v-notice.normal) {
+	background-color: var(--foreground-inverted);
+}
+
+:deep(.v-notice.string) {
+	background-color: var(--foreground-inverted);
+}
+
+.setup {
+	--theme--form--row-gap: 20px;
+	margin: 34px;
 }
 </style>

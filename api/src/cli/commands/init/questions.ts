@@ -1,4 +1,5 @@
 import path from 'path';
+import type { Driver } from '../../../types/index.js';
 
 const filename = ({ filepath }: { filepath: string }): Record<string, string> => ({
 	type: 'input',
@@ -14,14 +15,15 @@ const host = (): Record<string, string> => ({
 	default: '127.0.0.1',
 });
 
-const port = ({ client }: { client: string }): Record<string, any> => ({
+const port = ({ client }: { client: Exclude<Driver, 'sqlite3'> }): Record<string, any> => ({
 	type: 'input',
 	name: 'port',
 	message: 'Port:',
 	default() {
-		const ports: Record<string, number> = {
+		const ports: Record<Exclude<Driver, 'sqlite3'>, number> = {
 			pg: 5432,
-			mysql: 3306,
+			cockroachdb: 26257,
+			mysql2: 3306,
 			oracledb: 1521,
 			mssql: 1433,
 		};
@@ -66,8 +68,9 @@ const ssl = (): Record<string, string | boolean> => ({
 
 export const databaseQuestions = {
 	sqlite3: [filename],
-	mysql: [host, port, database, user, password],
+	mysql2: [host, port, database, user, password],
 	pg: [host, port, database, user, password, ssl],
+	cockroachdb: [host, port, database, user, password, ssl],
 	oracledb: [host, port, database, user, password],
 	mssql: [host, port, database, user, password, encrypt],
 };

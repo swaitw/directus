@@ -1,4 +1,4 @@
-import { defineInterface } from '@directus/shared/utils';
+import { defineInterface } from '@directus/extensions';
 import InterfaceSystemFieldTree from './system-field-tree.vue';
 
 export default defineInterface({

@@ -1,12 +1,14 @@
-import { defineDisplay } from '@directus/shared/utils';
-import bytes from 'bytes';
+import { defineDisplay } from '@directus/extensions';
+import { formatFilesize } from '@/utils/format-filesize';
+import { h } from 'vue';
 
 export default defineDisplay({
 	id: 'filesize',
 	name: '$t:displays.filesize.filesize',
 	description: '$t:displays.filesize.description',
 	icon: 'description',
-	component: ({ value }: { value: number }) => bytes(value, { decimalPlaces: 0 }),
+	component: ({ value }: { value: number }) => h('span', null, formatFilesize(value)),
+	handler: (value: number) => formatFilesize(value),
 	options: [],
-	types: ['integer'],
+	types: ['integer', 'bigInteger'],
 });

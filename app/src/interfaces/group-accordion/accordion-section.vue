@@ -1,16 +1,106 @@
+<script setup lang="ts">
+import { Field, ValidationError } from '@directus/types';
+import { isNil, merge } from 'lodash';
+import { computed } from 'vue';
+import { useI18n } from 'vue-i18n';
+
+const props = withDefaults(
+	defineProps<{
+		field: Field;
+		fields: Field[];
+		values: Record<string, unknown>;
+		initialValues: Record<string, unknown>;
+		disabled?: boolean;
+		batchMode?: boolean;
+		batchActiveFields?: string[];
+		primaryKey: number | string;
+		loading?: boolean;
+		validationErrors?: ValidationError[];
+		badge?: string;
+		group: string;
+		multiple?: boolean;
+		direction?: string;
+	}>(),
+	{
+		batchActiveFields: () => [],
+		validationErrors: () => [],
+	},
+);
+
+const emit = defineEmits<{
+	(e: 'apply', value: Record<string, unknown>): void;
+	(e: 'toggleAll'): void;
+}>();
+
+const { t } = useI18n();
+
+const fieldsInSection = computed(() => {
+	const fields: Field[] = [merge({}, props.field, { hideLabel: true })];
+
+	if (props.field.meta?.special?.includes('group')) {
+		fields.push(...getFieldsForGroup(props.field.meta?.field));
+	}
+
+	return fields;
+});
+
+const edited = computed(() => {
+	if (!props.values) return false;
+
+	const editedFields = Object.keys(props.values);
+	return fieldsInSection.value.some((field) => editedFields.includes(field.field));
+});
+
+const validationMessage = computed(() => {
+	const validationError = props.validationErrors.find((error) => error.field === props.field.field);
+	if (validationError === undefined) return;
+
+	if (validationError.code === 'RECORD_NOT_UNIQUE') {
+		return t('validationError.unique');
+	} else {
+		return t(`validationError.${validationError.type}`, validationError);
+	}
+});
+
+function handleModifier(event: MouseEvent, toggle: () => void) {
+	if (props.multiple === false) {
+		toggle();
+		return;
+	}
+
+	if (event.shiftKey) {
+		emit('toggleAll');
+	} else {
+		toggle();
+	}
+}
+
+function getFieldsForGroup(group: null | string, passed: string[] = []): Field[] {
+	const fieldsInGroup: Field[] = props.fields.filter((field) => {
+		return field.meta?.group === group || (group === null && isNil(field.meta));
+	});
+
+	for (const field of fieldsInGroup) {
+		if (field.meta?.special?.includes('group') && !passed.includes(field.meta!.field)) {
+			passed.push(field.meta!.field);
+			fieldsInGroup.push(...getFieldsForGroup(field.meta!.field, passed));
+		}
+	}
+
+	return fieldsInGroup;
+}
+</script>
+
 <template>
-	<v-item :value="field.field" scope="group-accordion" class="accordion-section">
+	<v-item v-if="!field.meta?.hidden" :value="field.field" scope="group-accordion" class="accordion-section">
 		<template #default="{ active, toggle }">
-			<div class="label type-title" :class="{ active }" @click="handleModifier($event, toggle)">
+			<div class="label type-title" :class="{ active, edited }" @click="handleModifier($event, toggle)">
+				<span v-if="edited" v-tooltip="t('edited')" class="edit-dot"></span>
 				<v-icon class="icon" :class="{ active }" name="expand_more" />
-				{{ field.name }}
-				<v-icon
-					v-if="!active && validationMessage"
-					v-tooltip="validationMessage"
-					class="warning"
-					name="error_outline"
-					small
-				/>
+				<span class="field-name">{{ field.name }}</span>
+				<v-icon v-if="field.meta?.required === true" class="required" sup name="star" filled />
+				<v-chip v-if="badge" x-small>{{ badge }}</v-chip>
+				<v-icon v-if="!active && validationMessage" v-tooltip="validationMessage" class="warning" name="error" small />
 			</div>
 
 			<transition-expand>
@@ -24,6 +114,10 @@
 						:validation-errors="validationErrors"
 						:loading="loading"
 						:batch-mode="batchMode"
+						:disabled="disabled"
+						:direction="direction"
+						:show-no-visible-fields="false"
+						:show-validation-errors="false"
 						@update:model-value="$emit('apply', $event)"
 					/>
 				</div>
@@ -32,155 +126,78 @@
 	</v-item>
 </template>
 
-<script lang="ts">
-import { defineComponent, PropType, computed } from 'vue';
-import { merge } from 'lodash';
-import { Field } from '@directus/shared/types';
-import { ValidationError } from '@directus/shared/types';
-import { useI18n } from 'vue-i18n';
-
-export default defineComponent({
-	name: 'AccordionSection',
-	props: {
-		field: {
-			type: Object as PropType<Field>,
-			required: true,
-		},
-		fields: {
-			type: Array as PropType<Field[]>,
-			required: true,
-		},
-		values: {
-			type: Object as PropType<Record<string, unknown>>,
-			required: true,
-		},
-		initialValues: {
-			type: Object as PropType<Record<string, unknown>>,
-			required: true,
-		},
-		disabled: {
-			type: Boolean,
-			default: false,
-		},
-		batchMode: {
-			type: Boolean,
-			default: false,
-		},
-		batchActiveFields: {
-			type: Array as PropType<string[]>,
-			default: () => [],
-		},
-		primaryKey: {
-			type: [Number, String],
-			required: true,
-		},
-		loading: {
-			type: Boolean,
-			default: false,
-		},
-		validationErrors: {
-			type: Array as PropType<ValidationError[]>,
-			default: () => [],
-		},
-		group: {
-			type: String,
-			required: true,
-		},
-
-		multiple: {
-			type: Boolean,
-			default: false,
-		},
-	},
-	emits: ['apply', 'toggleAll'],
-	setup(props, { emit }) {
-		const { t } = useI18n();
-
-		const fieldsInSection = computed(() => {
-			return props.fields
-				.filter((field) => {
-					if (field.meta?.group === props.group && field.meta?.id !== props.field.meta?.id) return false;
-					return true;
-				})
-				.map((field) => {
-					if (field.meta?.id === props.field.meta?.id) {
-						return merge({}, field, {
-							hideLabel: true,
-						});
-					}
-
-					return field;
-				});
-		});
-
-		const validationMessage = computed(() => {
-			const validationError = props.validationErrors.find((error) => error.field === props.field.field);
-			if (validationError === undefined) return;
-
-			if (validationError.code === 'RECORD_NOT_UNIQUE') {
-				return t('validationError.unique');
-			} else {
-				return t(`validationError.${validationError.type}`, validationError);
-			}
-		});
-
-		return { fieldsInSection, handleModifier, validationMessage };
-
-		function handleModifier(event: MouseEvent, toggle: () => void) {
-			if (props.multiple === false) {
-				toggle();
-				return;
-			}
-
-			if (event.shiftKey) {
-				emit('toggleAll');
-			} else {
-				toggle();
-			}
-		}
-	},
-});
-</script>
-
-<style scoped>
+<style lang="scss" scoped>
 .accordion-section {
-	border-top: var(--border-width) solid var(--border-normal);
-}
+	border-top: var(--theme--border-width) solid var(--theme--form--field--input--border-color);
 
-.accordion-section:last-child {
-	border-bottom: var(--border-width) solid var(--border-normal);
+	&:last-child {
+		border-bottom: var(--theme--border-width) solid var(--theme--form--field--input--border-color);
+	}
 }
 
 .label {
+	position: relative;
 	display: flex;
 	align-items: center;
 	margin: 8px 0;
-	color: var(--foreground-subdued);
-	cursor: pointer;
-	transition: color var(--fast) var(--transition);
-}
 
-.label:hover,
-.label.active {
-	color: var(--foreground-normal);
+	cursor: pointer;
+
+	&:hover,
+	&.active {
+		.field-name,
+		.icon {
+			color: var(--theme--form--field--input--foreground);
+		}
+	}
+
+	.field-name,
+	.icon {
+		color: var(--theme--form--field--input--foreground-subdued);
+		transition: color var(--fast) var(--transition);
+	}
+
+	.required {
+		--v-icon-color: var(--theme--primary);
+
+		margin-top: -12px;
+		margin-left: 2px;
+	}
+
+	.v-chip {
+		margin: 0;
+		margin-left: 8px;
+	}
+
+	.edit-dot {
+		position: absolute;
+		top: 14px;
+		left: -7px;
+		display: block;
+		width: 4px;
+		height: 4px;
+		background-color: var(--theme--form--field--input--foreground-subdued);
+		border-radius: 4px;
+		content: '';
+	}
 }
 
 .icon {
 	margin-right: 12px;
 	transform: rotate(-90deg);
 	transition: transform var(--fast) var(--transition);
-}
 
-.icon.active {
-	transform: rotate(0);
+	&.active {
+		transform: rotate(0);
+	}
 }
 
 .warning {
 	margin-left: 8px;
-	color: var(--danger);
+	color: var(--theme--danger);
 }
 
 .fields {
-	margin: var(--form-vertical-gap) 0;
+	margin: var(--theme--form--row-gap) 0;
 }
 </style>

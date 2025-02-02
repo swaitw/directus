@@ -1,3 +1,250 @@
+<script setup lang="ts">
+import { useCustomSelection, useCustomSelectionMultiple } from '@directus/composables';
+import { Placement } from '@popperjs/core';
+import { debounce, get, isArray } from 'lodash';
+import { computed, Ref, ref, toRefs, watch } from 'vue';
+import { useI18n } from 'vue-i18n';
+import SelectListItemGroup from './select-list-item-group.vue';
+import SelectListItem from './select-list-item.vue';
+import { Option } from './types';
+
+type ItemsRaw = (string | any)[];
+type InputValue = string[] | string | number | null;
+
+const props = withDefaults(
+	defineProps<{
+		/** The items that should be selectable */
+		items: ItemsRaw;
+		/** Which key in items is used to display the text */
+		itemText?: string;
+		/** Which key in items is used to model the active state */
+		itemValue?: string;
+		/** Which key in items is used to show an icon */
+		itemIcon?: string | null;
+		/** Which key in items is used to show an icon color */
+		itemColor?: string | null;
+		/** Which font family to use for checkbox item label */
+		itemLabelFontFamily?: string;
+		/** Which key in items is used to model the disabled state */
+		itemDisabled?: string;
+		/** Which key in items is used to model the selectable state */
+		itemSelectable?: string;
+		/** Which key in items is used to render the children */
+		itemChildren?: string;
+		/** Which items should be shown as selected, depending on their value */
+		modelValue?: InputValue;
+		/** Allow to select multiple values */
+		multiple?: boolean;
+		/** Allow to select the parent of a group */
+		groupSelectable?: boolean;
+		/** Require a minimum selection of at least one element */
+		mandatory?: boolean;
+		/** Text that is displayed when no items are selected */
+		placeholder?: string | null;
+		/** Spreads the select element to it's maximal width */
+		fullWidth?: boolean;
+		/** Disables any interaction */
+		disabled?: boolean;
+		/** Allow to deselect all currently selected items */
+		showDeselect?: boolean;
+		/** Allow to enter custom values */
+		allowOther?: boolean;
+		/** Closes the dropdown after an items has been selected  */
+		closeOnContentClick?: boolean;
+		/** Renders the element inline, good for seamless selections */
+		inline?: boolean;
+		label?: boolean;
+		/** Translation strings to replace items naming */
+		allItemsTranslation?: string;
+		itemCountTranslation?: string;
+		/** Limits the amount of items inside the preview */
+		multiplePreviewThreshold?: number;
+		/** The direction the menu should open */
+		placement?: Placement;
+		menuFullHeight?: boolean;
+	}>(),
+	{
+		itemText: 'text',
+		itemValue: 'value',
+		itemIcon: null,
+		itemDisabled: 'disabled',
+		itemSelectable: 'selectable',
+		itemChildren: 'children',
+		modelValue: null,
+		mandatory: true,
+		placeholder: null,
+		fullWidth: true,
+		closeOnContentClick: true,
+		multiplePreviewThreshold: 3,
+		placement: 'bottom',
+	},
+);
+
+const emit = defineEmits(['update:modelValue', 'group-toggle']);
+
+const { t } = useI18n();
+
+const { internalItems, internalItemsCount, internalSearch } = useItems();
+const { displayValue } = useDisplayValue();
+const { modelValue } = toRefs(props);
+
+const { otherValue, usesOtherValue } = useCustomSelection(modelValue as Ref<string>, internalItems, (value) =>
+	emit('update:modelValue', value),
+);
+
+const { otherValues, addOtherValue, setOtherValue } = useCustomSelectionMultiple(
+	modelValue as Ref<string[]>,
+	internalItems,
+	(value) => emit('update:modelValue', value),
+);
+
+const search = ref<string | null>(null);
+
+watch(
+	search,
+	debounce((val: string | null) => {
+		internalSearch.value = val;
+	}, 250),
+);
+
+function useItems() {
+	const internalSearch = ref<string | null>(null);
+
+	const internalItems = computed(() => {
+		const parseItem = (item: Record<string, any> | string): Option => {
+			if (typeof item === 'string') {
+				return {
+					text: item,
+					value: item,
+					hidden: internalSearch.value ? !filterItem(item) : false,
+				};
+			}
+
+			if (item.divider === true) return { value: null, divider: true };
+
+			const text = get(item, props.itemText);
+			const value = get(item, props.itemValue);
+			const children = get(item, props.itemChildren) ? get(item, props.itemChildren).map(parseItem) : null;
+
+			return {
+				text,
+				value,
+				icon: props.itemIcon ? get(item, props.itemIcon) : undefined,
+				color: props.itemColor ? get(item, props.itemColor) : undefined,
+				disabled: get(item, props.itemDisabled),
+				selectable: get(item, props.itemSelectable),
+				children: children
+					? children.filter((childItem: Record<string, any>) =>
+							filterItem(childItem.text, childItem.value, childItem.children),
+					  )
+					: children,
+				hidden: internalSearch.value ? !filterItem(text, value, item.children) : false,
+			};
+		};
+
+		const filterItem = (
+			text: string | undefined,
+			value?: string | number | null,
+			children?: Record<string, any>[] | null,
+		): boolean => {
+			if (!internalSearch.value) return true;
+
+			const searchValue = internalSearch.value.toLowerCase();
+
+			return children
+				? isMatchingCurrentItem(text, value, searchValue) ||
+						children.some((childItem: Record<string, any>) =>
+							filterItem(get(childItem, props.itemText), get(childItem, props.itemValue), childItem.children),
+						)
+				: isMatchingCurrentItem(text, value, searchValue);
+
+			function isMatchingCurrentItem(
+				text: string | undefined,
+				value: string | number | null | undefined,
+				searchValue: string,
+			): boolean {
+				return (
+					(text ? String(text).toLowerCase().includes(searchValue) : false) ||
+					(value ? String(value).toLowerCase().includes(searchValue) : false)
+				);
+			}
+		};
+
+		return props.items.map(parseItem);
+	});
+
+	const internalItemsCount = computed<number>(() => {
+		const countItems = (items: Option[]): number => {
+			const count = items.reduce((acc, item): number => {
+				if (item?.children) {
+					acc += countItems(item.children);
+				}
+
+				return acc + 1;
+			}, 0);
+
+			return count;
+		};
+
+		return countItems(props.items);
+	});
+
+	return { internalItems, internalItemsCount, internalSearch };
+}
+
+function useDisplayValue() {
+	const displayValue = computed(() => {
+		if (Array.isArray(props.modelValue)) {
+			if (props.modelValue.length < props.multiplePreviewThreshold) {
+				return {
+					text: props.modelValue
+						.map((value) => {
+							return getItemForValue(value)?.text || value;
+						})
+						.join(', '),
+				};
+			} else {
+				const itemCount = internalItems.value.length + otherValues.value.length;
+				const selectionCount = props.modelValue.length;
+
+				if (itemCount === selectionCount) {
+					return { text: t(props.allItemsTranslation ?? 'all_items') };
+				} else {
+					return { text: t(props.itemCountTranslation ?? 'item_count', selectionCount) };
+				}
+			}
+		}
+
+		if (props.multiple) {
+			return { text: t(props.itemCountTranslation ?? 'item_count', 0) };
+		}
+
+		const item = getItemForValue(props.modelValue);
+		return { text: item?.text || props.modelValue, icon: item?.icon, color: item?.color };
+	});
+
+	return { displayValue };
+
+	function getItemForValue(value: string | number | null) {
+		return findValue(internalItems.value);
+
+		function findValue(choices: Option[]): Option | undefined {
+			let textValue: Option | undefined = choices.find((item) => item.value === value);
+
+			for (const choice of choices) {
+				if (!textValue) {
+					if (choice.children) {
+						textValue = findValue(choice.children);
+					}
+				}
+			}
+
+			return textValue;
+		}
+	}
+}
+</script>
+
 <template>
 	<v-menu
 		class="v-select"
@@ -6,24 +253,41 @@
 		:show-arrow="inline === true"
 		:close-on-content-click="closeOnContentClick"
 		:placement="placement"
+		:full-height="menuFullHeight"
 	>
 		<template #activator="{ toggle, active }">
-			<div v-if="inline" class="inline-display" :class="{ placeholder: !displayValue }" @click="toggle">
-				<slot name="preview">{{ displayValue || placeholder }}</slot>
+			<div
+				v-if="inline"
+				class="inline-display"
+				:class="{ placeholder: !displayValue.text, label, active, disabled }"
+				@click="toggle"
+			>
+				<slot name="preview">{{ displayValue.text || placeholder }}</slot>
 				<v-icon name="expand_more" :class="{ active }" />
 			</div>
-			<slot v-else name="preview">
+			<slot
+				v-else
+				name="preview"
+				v-bind="{
+					toggle: toggle,
+					active: active,
+				}"
+			>
 				<v-input
 					:full-width="fullWidth"
 					readonly
-					:model-value="displayValue"
+					:model-value="displayValue.text"
 					clickable
 					:placeholder="placeholder"
 					:disabled="disabled"
 					:active="active"
 					@click="toggle"
 				>
-					<template v-if="$slots.prepend" #prepend><slot name="prepend" /></template>
+					<template v-if="$slots.prepend || displayValue.icon || displayValue.color" #prepend>
+						<slot v-if="$slots.prepend" name="prepend" />
+						<v-icon v-else-if="displayValue.icon" :name="displayValue.icon" :color="displayValue.color" />
+						<display-color v-else-if="displayValue.color" :value="displayValue.color" />
+					</template>
 					<template #append>
 						<v-icon name="expand_more" :class="{ active }" />
 						<slot name="append" />
@@ -48,19 +312,38 @@
 				<v-divider />
 			</template>
 
+			<v-list-item v-if="internalItemsCount === 0 && !allowOther">
+				<v-list-item-content>
+					{{ t('no_options_available') }}
+				</v-list-item-content>
+			</v-list-item>
+
+			<v-list-item v-if="internalItemsCount > 10 || search">
+				<v-list-item-content>
+					<v-input v-model="search" autofocus small :placeholder="t('search')" @click.stop.prevent>
+						<template #append>
+							<v-icon small name="search" />
+						</template>
+					</v-input>
+				</v-list-item-content>
+			</v-list-item>
+
 			<template v-for="(item, index) in internalItems" :key="index">
 				<select-list-item-group
 					v-if="item.children"
 					:item="item"
+					:item-label-font-family="itemLabelFontFamily"
 					:model-value="modelValue"
 					:multiple="multiple"
 					:allow-other="allowOther"
+					:group-selectable="groupSelectable"
 					@update:model-value="$emit('update:modelValue', $event)"
 				/>
 				<select-list-item
 					v-else
 					:model-value="modelValue"
 					:item="item"
+					:item-label-font-family="itemLabelFontFamily"
 					:multiple="multiple"
 					:allow-other="allowOther"
 					@update:model-value="$emit('update:modelValue', $event)"
@@ -82,7 +365,11 @@
 				<v-list-item
 					v-for="otherVal in otherValues"
 					:key="otherVal.key"
-					:active="(modelValue || []).includes(otherVal.value)"
+					:active="
+						(modelValue && (typeof modelValue === 'string' || isArray(modelValue)) ? modelValue : []).includes(
+							otherVal.value,
+						)
+					"
 					@click.stop
 				>
 					<v-list-item-icon>
@@ -98,7 +385,7 @@
 							class="other-input"
 							:value="otherVal.value"
 							:placeholder="t('other')"
-							@input="setOtherValue(otherVal.key, $event.target.value)"
+							@input="setOtherValue(otherVal.key, ($event.target as any)?.value)"
 							@blur="otherVal.value.length === 0 && setOtherValue(otherVal.key, null)"
 						/>
 					</v-list-item-content>
@@ -116,213 +403,22 @@
 	</v-menu>
 </template>
 
-<script lang="ts">
-import { useI18n } from 'vue-i18n';
-import { defineComponent, PropType, computed, toRefs, Ref } from 'vue';
-import { useCustomSelection, useCustomSelectionMultiple } from '@/composables/use-custom-selection';
-import { get } from 'lodash';
-import SelectListItemGroup from './select-list-item-group.vue';
-import SelectListItem from './select-list-item.vue';
-import { Option } from './types';
-import { Placement } from '@popperjs/core';
+<style scoped lang="scss">
+/*
 
-type ItemsRaw = (string | any)[];
-type InputValue = string[] | string;
+	Available Variables:
 
-export default defineComponent({
-	components: { SelectListItemGroup, SelectListItem },
-	props: {
-		items: {
-			type: Array as PropType<ItemsRaw>,
-			required: true,
-		},
-		itemText: {
-			type: String,
-			default: 'text',
-		},
-		itemValue: {
-			type: String,
-			default: 'value',
-		},
-		itemIcon: {
-			type: String,
-			default: null,
-		},
-		itemDisabled: {
-			type: String,
-			default: 'disabled',
-		},
-		itemSelectable: {
-			type: String,
-			default: 'selectable',
-		},
-		itemChildren: {
-			type: String,
-			default: 'children',
-		},
-		modelValue: {
-			type: [Array, String, Number, Boolean] as PropType<InputValue>,
-			default: null,
-		},
-		multiple: {
-			type: Boolean,
-			default: false,
-		},
-		mandatory: {
-			type: Boolean,
-			default: true,
-		},
-		placeholder: {
-			type: String,
-			default: null,
-		},
-		fullWidth: {
-			type: Boolean,
-			default: true,
-		},
-		disabled: {
-			type: Boolean,
-			default: false,
-		},
-		showDeselect: {
-			type: Boolean,
-			default: false,
-		},
-		allowOther: {
-			type: Boolean,
-			default: false,
-		},
-		closeOnContentClick: {
-			type: Boolean,
-			default: true,
-		},
-		inline: {
-			type: Boolean,
-			default: false,
-		},
-		multiplePreviewThreshold: {
-			type: Number,
-			default: 3,
-		},
-		placement: {
-			type: String as PropType<Placement>,
-			default: 'bottom',
-		},
-	},
-	emits: ['update:modelValue', 'group-toggle'],
-	setup(props, { emit }) {
-		const { t } = useI18n();
+		--v-select-font-family        [var(--theme--fonts--sans--font-family)]
+		--v-select-placeholder-color  [var(--theme--foreground-subdued)]
 
-		const { internalItems } = useItems();
-		const { displayValue } = useDisplayValue();
-		const { modelValue } = toRefs(props);
-		const { otherValue, usesOtherValue } = useCustomSelection(modelValue as Ref<string>, internalItems, (value) =>
-			emit('update:modelValue', value)
-		);
-		const { otherValues, addOtherValue, setOtherValue } = useCustomSelectionMultiple(
-			modelValue as Ref<string[]>,
-			internalItems,
-			(value) => emit('update:modelValue', value)
-		);
-
-		return { t, internalItems, displayValue, otherValue, usesOtherValue, otherValues, addOtherValue, setOtherValue };
-
-		function useItems() {
-			const internalItems = computed(() => {
-				const parseItem = (item: Record<string, any>): Option => {
-					if (typeof item === 'string') {
-						return {
-							text: item,
-							value: item,
-						};
-					}
-
-					if (item.divider === true) return { value: null, divider: true };
-
-					const children = get(item, props.itemChildren) ? get(item, props.itemChildren).map(parseItem) : null;
-
-					return {
-						text: get(item, props.itemText),
-						value: get(item, props.itemValue),
-						icon: get(item, props.itemIcon),
-						disabled: get(item, props.itemDisabled),
-						selectable: get(item, props.itemSelectable),
-						children,
-					};
-				};
-
-				const items = props.items.map(parseItem);
-
-				return items;
-			});
-
-			return { internalItems };
-		}
-
-		function useDisplayValue() {
-			const displayValue = computed(() => {
-				if (Array.isArray(props.modelValue)) {
-					if (props.modelValue.length < props.multiplePreviewThreshold) {
-						return props.modelValue
-							.map((value) => {
-								return getTextForValue(value) || value;
-							})
-							.join(', ');
-					} else {
-						const itemCount = internalItems.value.length + otherValues.value.length;
-						const selectionCount = props.modelValue.length;
-
-						if (itemCount === selectionCount) {
-							return t('all_items');
-						} else {
-							return t('item_count', selectionCount);
-						}
-					}
-				}
-
-				return getTextForValue(props.modelValue) || props.modelValue;
-			});
-
-			return { displayValue };
-
-			function getTextForValue(value: string | number) {
-				return findValue(internalItems.value);
-
-				function findValue(choices: Option[]): string | undefined {
-					let textValue: string | undefined = choices.find((item) => item.value === value)?.['text'];
-
-					for (const choice of choices) {
-						if (!textValue) {
-							if (choice.children) {
-								textValue = findValue(choice.children);
-							}
-						}
-					}
-
-					return textValue;
-				}
-			}
-		}
-	},
-});
-</script>
-
-<style scoped>
-:global(body) {
-	--v-select-font-family: var(--family-sans-serif);
-	--v-select-placeholder-color: var(--foreground-subdued);
-}
+*/
 
 .list {
-	--v-list-min-width: 0;
-}
-
-.item-text {
-	font-family: var(--v-select-font-family);
+	--v-list-min-width: 180px;
 }
 
 .v-input {
-	--v-input-font-family: var(--v-select-font-family);
+	--v-input-font-family: var(--v-select-font-family, var(--theme--fonts--sans--font-family));
 
 	cursor: pointer;
 }
@@ -352,7 +448,24 @@ export default defineComponent({
 .inline-display {
 	width: max-content;
 	padding-right: 18px;
-	cursor: pointer;
+
+	&:not(.disabled) {
+		cursor: pointer;
+	}
+}
+
+.inline-display.label {
+	padding: 4px 8px;
+	padding-right: 26px;
+	color: var(--theme--foreground-subdued);
+	background-color: var(--theme--form--field--input--background-subdued);
+	border-radius: var(--theme--border-radius);
+	transition: color var(--fast) var(--transition);
+
+	&:hover,
+	&.active {
+		color: var(--foreground);
+	}
 }
 
 .inline-display .v-icon {
@@ -360,6 +473,11 @@ export default defineComponent({
 }
 
 .inline-display.placeholder {
-	color: var(--v-select-placeholder-color);
+	color: var(--v-select-placeholder-color, var(--theme--foreground-subdued));
+}
+
+.color-dot {
+	margin-left: 7px;
+	margin-right: 7px;
 }
 </style>

@@ -1,9 +1,10 @@
 import { format } from 'date-fns';
 import { Router } from 'express';
-import { RouteNotFoundException } from '../exceptions';
-import { respond } from '../middleware/respond';
-import { ServerService, SpecificationService } from '../services';
-import asyncHandler from '../utils/async-handler';
+import { RouteNotFoundError } from '@directus/errors';
+import { respond } from '../middleware/respond.js';
+import { ServerService } from '../services/server.js';
+import { SpecificationService } from '../services/specifications.js';
+import asyncHandler from '../utils/async-handler.js';
 
 const router = Router();
 
@@ -15,10 +16,10 @@ router.get(
 			schema: req.schema,
 		});
 
-		res.locals.payload = await service.oas.generate();
+		res.locals['payload'] = await service.oas.generate(req.headers.host);
 		return next();
 	}),
-	respond
+	respond,
 );
 
 router.get(
@@ -34,20 +35,18 @@ router.get(
 			schema: req.schema,
 		});
 
-		const scope = req.params.scope || 'items';
+		const scope = req.params['scope'] || 'items';
 
-		if (['items', 'system'].includes(scope) === false) throw new RouteNotFoundException(req.path);
+		if (['items', 'system'].includes(scope) === false) throw new RouteNotFoundError({ path: req.path });
 
 		const info = await serverService.serverInfo();
 		const result = await service.graphql.generate(scope as 'items' | 'system');
-		const filename = info.project.project_name + '_' + format(new Date(), 'yyyy-MM-dd') + '.graphql';
+		const filename = info['project'].project_name + '_' + format(new Date(), 'yyyy-MM-dd') + '.graphql';
 
 		res.attachment(filename);
 		res.send(result);
-	})
+	}),
 );
-
-router.get('/ping', (req, res) => res.send('pong'));
 
 router.get(
 	'/info',
@@ -56,11 +55,12 @@ router.get(
 			accountability: req.accountability,
 			schema: req.schema,
 		});
+
 		const data = await service.serverInfo();
-		res.locals.payload = { data };
+		res.locals['payload'] = { data };
 		return next();
 	}),
-	respond
+	respond,
 );
 
 router.get(
@@ -75,12 +75,12 @@ router.get(
 
 		res.setHeader('Content-Type', 'application/health+json');
 
-		if (data.status === 'error') res.status(503);
-		res.locals.payload = data;
-		res.locals.cache = false;
+		if (data['status'] === 'error') res.status(503);
+		res.locals['payload'] = data;
+		res.locals['cache'] = false;
 		return next();
 	}),
-	respond
+	respond,
 );
 
 export default router;

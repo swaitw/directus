@@ -1,4 +1,4 @@
-import { defineDisplay } from '@directus/shared/utils';
+import { defineDisplay } from '@directus/extensions';
 import DisplayFile from './file.vue';
 
 export default defineDisplay({
@@ -8,6 +8,7 @@ export default defineDisplay({
 	icon: 'insert_drive_file',
 	component: DisplayFile,
 	types: ['uuid'],
+	localTypes: ['file'],
 	options: [],
 	fields: ['id', 'type', 'title'],
 });

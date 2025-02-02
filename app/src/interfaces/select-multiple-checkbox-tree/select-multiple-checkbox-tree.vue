@@ -1,6 +1,53 @@
+<script setup lang="ts">
+import { debounce } from 'lodash';
+import { computed, ref, toRefs, watch } from 'vue';
+import { useI18n } from 'vue-i18n';
+
+export type Choice = {
+	text: string;
+	value: string | number;
+	children?: Choice[];
+};
+
+const props = withDefaults(
+	defineProps<{
+		value: string[] | null;
+		disabled?: boolean;
+		choices?: Choice[];
+		valueCombining?: 'all' | 'branch' | 'leaf' | 'indeterminate' | 'exclusive';
+	}>(),
+	{
+		value: () => [],
+		choices: () => [],
+		valueCombining: 'all',
+	},
+);
+
+defineEmits(['input']);
+
+const { t } = useI18n();
+const search = ref('');
+
+const { choices, value } = toRefs(props);
+const items = computed(() => choices.value || []);
+
+const showSelectionOnly = ref(false);
+
+const setSearchDebounced = debounce((val: string) => {
+	searchDebounced.value = val;
+}, 250);
+
+watch(search, setSearchDebounced);
+
+const searchDebounced = ref('');
+</script>
+
 <template>
-	<div class="select-multiple-checkbox-tree">
-		<div class="search">
+	<v-notice v-if="items.length === 0" type="info">
+		{{ t('no_options_available') }}
+	</v-notice>
+	<div v-else class="select-multiple-checkbox-tree">
+		<div v-if="items.length > 10" class="search">
 			<v-input v-model="search" class="input" type="text" :placeholder="t('search')">
 				<template #prepend>
 					<v-icon name="search" />
@@ -16,81 +63,35 @@
 			:model-value="value"
 			:search="searchDebounced"
 			:disabled="disabled"
-			:choices="choices"
+			:choices="items"
 			:value-combining="valueCombining"
 			:show-selection-only="showSelectionOnly"
 			@update:model-value="$emit('input', $event)"
 		/>
 
 		<div class="footer">
-			<span :class="{ active: showSelectionOnly === false }" @click="showSelectionOnly = false">
+			<button :class="{ active: showSelectionOnly === false }" @click="showSelectionOnly = false">
 				{{ t('interfaces.select-multiple-checkbox-tree.show_all') }}
-			</span>
+			</button>
 			/
-			<span :class="{ active: showSelectionOnly === true }" @click="showSelectionOnly = true">
+			<button
+				:class="{ active: showSelectionOnly === true }"
+				:disabled="value == null || value.length === 0"
+				@click="showSelectionOnly = true"
+			>
 				{{ t('interfaces.select-multiple-checkbox-tree.show_selected') }}
-			</span>
+			</button>
 		</div>
 	</div>
 </template>
-
-<script lang="ts">
-import { debounce } from 'lodash';
-import { defineComponent, PropType, ref, watch } from 'vue';
-import { useI18n } from 'vue-i18n';
-
-type Choice = {
-	text: string;
-	value: string | number;
-	children?: Choice[];
-};
-
-export default defineComponent({
-	props: {
-		value: {
-			type: Array as PropType<string[]>,
-			default: () => [],
-		},
-		disabled: {
-			type: Boolean,
-			default: false,
-		},
-		choices: {
-			type: Array as PropType<Choice[]>,
-			default: () => [],
-		},
-		valueCombining: {
-			type: String as PropType<'all' | 'branch' | 'leaf' | 'indeterminate' | 'exclusive'>,
-			default: 'all',
-		},
-	},
-	emits: ['input'],
-	setup() {
-		const { t } = useI18n();
-		const search = ref('');
-
-		const showSelectionOnly = ref(false);
-
-		const setSearchDebounced = debounce((val: string) => {
-			searchDebounced.value = val;
-		}, 250);
-
-		watch(search, setSearchDebounced);
-
-		const searchDebounced = ref('');
-
-		return { search, t, searchDebounced, showSelectionOnly };
-	},
-});
-</script>
 
 <style scoped>
 .select-multiple-checkbox-tree {
 	max-height: var(--input-height-max);
 	overflow: auto;
-	background-color: var(--background-page);
-	border: var(--border-width) solid var(--border-normal);
-	border-radius: var(--border-radius);
+	background-color: var(--theme--background);
+	border: var(--theme--border-width) solid var(--theme--form--field--input--border-color);
+	border-radius: var(--theme--border-radius);
 }
 
 .search {
@@ -102,7 +103,7 @@ export default defineComponent({
 }
 
 .search .v-input {
-	box-shadow: 0 0 4px 4px var(--background-page);
+	box-shadow: 0 0 4px 4px var(--theme--background);
 }
 
 .footer {
@@ -114,21 +115,26 @@ export default defineComponent({
 	width: max-content;
 	padding: 4px 8px;
 	text-align: right;
-	background-color: var(--background-page);
-	border-top-left-radius: var(--border-radius);
+	background-color: var(--theme--background);
+	border-top-left-radius: var(--theme--border-radius);
 }
 
-.footer > span {
-	color: var(--foreground-subdued);
+.footer > button {
+	color: var(--theme--form--field--input--foreground-subdued);
 	cursor: pointer;
 	transition: color var(--fast) var(--transition);
 }
 
-.footer > span:hover {
-	color: var(--foreground-normal);
+.footer > button:hover {
+	color: var(--theme--form--field--input--foreground);
 }
 
-.footer > span.active {
-	color: var(--primary);
+.footer > button.active {
+	color: var(--theme--primary);
+}
+
+.footer > button:disabled {
+	color: var(--theme--form--field--input--foreground-subdued);
+	cursor: not-allowed;
 }
 </style>

@@ -1,13 +1,160 @@
+<script setup lang="ts">
+import api from '@/api';
+import { useRelationM2O } from '@/composables/use-relation-m2o';
+import { useRelationPermissionsM2O } from '@/composables/use-relation-permissions';
+import { RelationQuerySingle, useRelationSingle } from '@/composables/use-relation-single';
+import { addQueryToPath } from '@/utils/add-query-to-path';
+import { getAssetUrl } from '@/utils/get-asset-url';
+import { readableMimeType } from '@/utils/readable-mime-type';
+import { unexpectedError } from '@/utils/unexpected-error';
+import DrawerFiles from '@/views/private/components/drawer-files.vue';
+import DrawerItem from '@/views/private/components/drawer-item.vue';
+import { computed, ref, toRefs } from 'vue';
+import { useI18n } from 'vue-i18n';
+
+type FileInfo = {
+	id: string;
+	title: string;
+	type: string;
+};
+
+const props = defineProps<{
+	value: string | Record<string, any> | null;
+	disabled?: boolean;
+	loading?: boolean;
+	folder?: string;
+	collection: string;
+	field: string;
+}>();
+
+const emit = defineEmits<{
+	input: [value: string | Record<string, any> | null];
+}>();
+
+const value = computed({
+	get: () => props.value,
+	set: (value) => {
+		emit('input', value);
+	},
+});
+
+const query = ref<RelationQuerySingle>({
+	fields: ['id', 'title', 'type', 'filename_download'],
+});
+
+const { collection, field } = toRefs(props);
+const { relationInfo } = useRelationM2O(collection, field);
+
+const {
+	displayItem: file,
+	loading,
+	update,
+	remove,
+} = useRelationSingle(value, query, relationInfo, {
+	enabled: computed(() => !props.loading),
+});
+
+const { createAllowed } = useRelationPermissionsM2O(relationInfo);
+
+const { t } = useI18n();
+
+const activeDialog = ref<'upload' | 'choose' | 'url' | null>(null);
+
+const fileExtension = computed(() => {
+	if (file.value === null) return null;
+	return readableMimeType(file.value.type, true);
+});
+
+const assetURL = computed(() => {
+	const id = typeof props.value === 'string' ? props.value : props.value?.id;
+	return getAssetUrl(id);
+});
+
+const imageThumbnail = computed(() => {
+	if (file.value === null || props.value === null) return null;
+	if (file.value.type.includes('svg')) return assetURL.value;
+	if (file.value.type.includes('image') === false) return null;
+	return addQueryToPath(assetURL.value, { key: 'system-small-cover' });
+});
+
+const imageThumbnailError = ref<any>(null);
+
+const { url, isValidURL, loading: urlLoading, importFromURL } = useURLImport();
+
+const editDrawerActive = ref(false);
+
+const edits = computed(() => {
+	if (!props.value || typeof props.value !== 'object') return {};
+
+	return props.value;
+});
+
+function setSelection(selection: (string | number)[] | null) {
+	if (selection![0]) {
+		update(selection![0]);
+	} else {
+		remove();
+	}
+}
+
+function onUpload(fileInfo: FileInfo) {
+	file.value = fileInfo;
+	activeDialog.value = null;
+	update(fileInfo.id);
+}
+
+function useURLImport() {
+	const url = ref('');
+	const loading = ref(false);
+
+	const isValidURL = computed(() => {
+		try {
+			new URL(url.value);
+			return true;
+		} catch {
+			return false;
+		}
+	});
+
+	return { url, loading, isValidURL, importFromURL };
+
+	async function importFromURL() {
+		loading.value = true;
+
+		try {
+			const response = await api.post(`/files/import`, {
+				url: url.value,
+				data: {
+					folder: props.folder,
+				},
+			});
+
+			file.value = response.data.data;
+
+			activeDialog.value = null;
+			url.value = '';
+			update(file.value?.id);
+		} catch (error) {
+			unexpectedError(error);
+		} finally {
+			loading.value = false;
+		}
+	}
+}
+</script>
+
 <template>
 	<div class="file">
 		<v-menu attached :disabled="loading">
-			<template #activator="{ toggle }">
+			<template #activator="{ toggle, active }">
 				<div>
 					<v-skeleton-loader v-if="loading" type="input" />
 					<v-input
 						v-else
 						clickable
 						readonly
+						:active="active"
+						:disabled="disabled"
 						:placeholder="t('no_file_selected')"
 						:model-value="file && file.title"
 						@click="toggle"
@@ -20,25 +167,29 @@
 									'is-svg': file?.type?.includes('svg'),
 								}"
 							>
-								<img v-if="imageThumbnail" :src="imageThumbnail" :alt="file.title" />
+								<v-image
+									v-if="imageThumbnail && !imageThumbnailError"
+									:src="imageThumbnail"
+									:alt="file?.title"
+									@error="imageThumbnailError = $event"
+								/>
 								<span v-else-if="fileExtension" class="extension">
 									{{ fileExtension }}
 								</span>
 								<v-icon v-else name="folder_open" />
 							</div>
 						</template>
+
 						<template #append>
-							<template v-if="file">
-								<v-icon v-tooltip="t('edit')" name="open_in_new" class="edit" @click.stop="editDrawerActive = true" />
-								<v-icon
-									v-if="!disabled"
-									v-tooltip="t('deselect')"
-									class="deselect"
-									name="close"
-									@click.stop="$emit('input', null)"
-								/>
-							</template>
-							<v-icon v-else name="attach_file" />
+							<div class="item-actions">
+								<template v-if="file">
+									<v-icon v-tooltip="t('edit_item')" name="edit" clickable @click.stop="editDrawerActive = true" />
+
+									<v-remove v-if="!disabled" :item-info="relationInfo" :item-edits="edits" deselect @action="remove" />
+								</template>
+
+								<v-icon v-else name="attach_file" />
+							</div>
 						</template>
 					</v-input>
 				</div>
@@ -46,7 +197,7 @@
 
 			<v-list>
 				<template v-if="file">
-					<v-list-item :download="file.filename_download" :href="assetURL">
+					<v-list-item clickable :download="file.filename_download" :href="getAssetUrl(file.id, true)">
 						<v-list-item-icon><v-icon name="get_app" /></v-list-item-icon>
 						<v-list-item-content>{{ t('download_file') }}</v-list-item-content>
 					</v-list-item>
@@ -54,7 +205,7 @@
 					<v-divider v-if="!disabled" />
 				</template>
 				<template v-if="!disabled">
-					<v-list-item clickable @click="activeDialog = 'upload'">
+					<v-list-item v-if="createAllowed" clickable @click="activeDialog = 'upload'">
 						<v-list-item-icon><v-icon name="phonelink" /></v-list-item-icon>
 						<v-list-item-content>
 							{{ t(file ? 'replace_from_device' : 'upload_from_device') }}
@@ -68,7 +219,7 @@
 						</v-list-item-content>
 					</v-list-item>
 
-					<v-list-item clickable @click="activeDialog = 'url'">
+					<v-list-item v-if="createAllowed" clickable @click="activeDialog = 'url'">
 						<v-list-item-icon><v-icon name="link" /></v-list-item-icon>
 						<v-list-item-content>
 							{{ t(file ? 'replace_from_url' : 'import_from_url') }}
@@ -84,8 +235,15 @@
 			collection="directus_files"
 			:primary-key="file.id"
 			:edits="edits"
-			@input="stageEdits"
-		/>
+			:disabled="disabled"
+			@input="update"
+		>
+			<template #actions>
+				<v-button secondary rounded icon :download="file.filename_download" :href="getAssetUrl(file.id, true)">
+					<v-icon name="download" />
+				</v-button>
+			</template>
+		</drawer-item>
 
 		<v-dialog
 			:model-value="activeDialog === 'upload'"
@@ -103,8 +261,9 @@
 			</v-card>
 		</v-dialog>
 
-		<drawer-collection
-			collection="directus_files"
+		<drawer-files
+			v-if="activeDialog === 'choose'"
+			:folder="folder"
 			:active="activeDialog === 'choose'"
 			@update:active="activeDialog = null"
 			@input="setSelection"
@@ -134,212 +293,15 @@
 	</div>
 </template>
 
-<script lang="ts">
-import { useI18n } from 'vue-i18n';
-import { defineComponent, ref, watch, computed, PropType } from 'vue';
-import DrawerCollection from '@/views/private/components/drawer-collection';
-import api from '@/api';
-import readableMimeType from '@/utils/readable-mime-type';
-import { getRootPath } from '@/utils/get-root-path';
-import { unexpectedError } from '@/utils/unexpected-error';
-import { addTokenToURL } from '@/api';
-import DrawerItem from '@/views/private/components/drawer-item';
-import { addQueryToPath } from '@/utils/add-query-to-path';
-
-type FileInfo = {
-	id: string;
-	title: string;
-	type: string;
-};
-
-export default defineComponent({
-	components: { DrawerCollection, DrawerItem },
-	props: {
-		value: {
-			type: [String, Object] as PropType<string | Record<string, any>>,
-			default: null,
-		},
-		disabled: {
-			type: Boolean,
-			default: false,
-		},
-		folder: {
-			type: String,
-			default: undefined,
-		},
-	},
-	emits: ['input'],
-	setup(props, { emit }) {
-		const { t } = useI18n();
-
-		const activeDialog = ref<'upload' | 'choose' | 'url' | null>(null);
-		const { loading, file, fetchFile } = useFile();
-
-		watch(() => props.value, fetchFile, { immediate: true });
-
-		const fileExtension = computed(() => {
-			if (file.value === null) return null;
-			return readableMimeType(file.value.type, true);
-		});
-
-		const assetURL = computed(() => {
-			const id = typeof props.value === 'string' ? props.value : props.value?.id;
-			return addTokenToURL(getRootPath() + `assets/${id}`);
-		});
-
-		const imageThumbnail = computed(() => {
-			if (file.value === null || props.value === null) return null;
-			if (file.value.type.includes('svg')) return assetURL.value;
-			if (file.value.type.includes('image') === false) return null;
-			return addQueryToPath(assetURL.value, { key: 'system-small-cover' });
-		});
-
-		const { edits, stageEdits } = useEdits();
-		const { url, isValidURL, loading: urlLoading, importFromURL } = useURLImport();
-
-		const editDrawerActive = ref(false);
-
-		return {
-			t,
-			activeDialog,
-			setSelection,
-			loading,
-			file,
-			fileExtension,
-			imageThumbnail,
-			onUpload,
-			url,
-			urlLoading,
-			importFromURL,
-			isValidURL,
-			assetURL,
-			editDrawerActive,
-			edits,
-			stageEdits,
-		};
-
-		function useFile() {
-			const loading = ref(false);
-			const file = ref<FileInfo | null>(null);
-
-			return { loading, file, fetchFile };
-
-			async function fetchFile() {
-				if (props.value === null) {
-					file.value = null;
-					loading.value = false;
-					return;
-				}
-
-				loading.value = true;
-
-				try {
-					const id = typeof props.value === 'string' ? props.value : (props.value as Record<string, any>)?.id;
-
-					const response = await api.get(`/files/${id}`, {
-						params: {
-							fields: ['id', 'title', 'type', 'filename_download'],
-						},
-					});
-
-					if (props.value !== null && typeof props.value === 'object') {
-						file.value = {
-							...response.data.data,
-							...props.value,
-						};
-					} else {
-						file.value = response.data.data;
-					}
-				} catch (err: any) {
-					unexpectedError(err);
-				} finally {
-					loading.value = false;
-				}
-			}
-		}
-
-		function setSelection(selection: number[]) {
-			if (selection[0]) {
-				emit('input', selection[0]);
-			} else {
-				emit('input', null);
-			}
-		}
-
-		function onUpload(fileInfo: FileInfo) {
-			file.value = fileInfo;
-			activeDialog.value = null;
-			emit('input', fileInfo.id);
-		}
-
-		function useURLImport() {
-			const url = ref('');
-			const loading = ref(false);
-
-			const isValidURL = computed(() => {
-				try {
-					new URL(url.value);
-					return true;
-				} catch {
-					return false;
-				}
-			});
-
-			return { url, loading, isValidURL, importFromURL };
-
-			async function importFromURL() {
-				loading.value = true;
-
-				try {
-					const response = await api.post(`/files/import`, {
-						url: url.value,
-						data: {
-							folder: props.folder,
-						},
-					});
-
-					file.value = response.data.data;
-
-					activeDialog.value = null;
-					url.value = '';
-					emit('input', file.value?.id);
-				} catch (err: any) {
-					unexpectedError(err);
-				} finally {
-					loading.value = false;
-				}
-			}
-		}
-
-		function useEdits() {
-			const edits = computed(() => {
-				// If the current value isn't a primitive, it means we've already staged some changes
-				// This ensures we continue on those changes instead of starting over
-				if (props.value && typeof props.value === 'object') {
-					return props.value;
-				}
-
-				return {};
-			});
-
-			return { edits, stageEdits };
-
-			function stageEdits(newEdits: Record<string, any>) {
-				if (!file.value) return;
-
-				emit('input', {
-					id: file.value.id,
-					...newEdits,
-				});
-			}
-		}
-	},
-});
-</script>
-
 <style lang="scss" scoped>
+@use '@/styles/mixins';
+
+.item-actions {
+	@include mixins.list-interface-item-actions;
+}
+
 .preview {
-	--v-icon-color: var(--foreground-subdued);
+	--v-icon-color: var(--theme--form--field--input--foreground-subdued);
 
 	display: flex;
 	align-items: center;
@@ -348,8 +310,8 @@ export default defineComponent({
 	height: 40px;
 	margin-left: -8px;
 	overflow: hidden;
-	background-color: var(--background-normal);
-	border-radius: var(--border-radius);
+	background-color: var(--theme--background-normal);
+	border-radius: var(--theme--border-radius);
 
 	img {
 		width: 100%;
@@ -358,36 +320,23 @@ export default defineComponent({
 	}
 
 	&.has-file {
-		background-color: var(--primary-alt);
+		background-color: var(--theme--primary-background);
 	}
 
 	&.is-svg {
 		padding: 4px;
-		background-color: var(--background-normal-alt);
 
 		img {
 			object-fit: contain;
-			filter: drop-shadow(0px 0px 8px rgba(0, 0, 0, 0.25));
+			filter: drop-shadow(0px 0px 8px rgb(0 0 0 / 0.25));
 		}
 	}
 }
 
 .extension {
-	color: var(--primary);
+	color: var(--theme--primary);
 	font-weight: 600;
 	font-size: 11px;
 	text-transform: uppercase;
-}
-
-.deselect:hover {
-	--v-icon-color: var(--danger);
-}
-
-.edit {
-	margin-right: 4px;
-
-	&:hover {
-		--v-icon-color: var(--foreground-normal);
-	}
 }
 </style>

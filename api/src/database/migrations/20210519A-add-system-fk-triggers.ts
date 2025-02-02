@@ -1,6 +1,7 @@
-import { Knex } from 'knex';
-import logger from '../../logger';
-import SchemaInspector from 'knex-schema-inspector';
+import { createInspector } from '@directus/schema';
+import type { Knex } from 'knex';
+import { useLogger } from '../../logger/index.js';
+import { getDatabaseClient } from '../index.js';
 
 /**
  * Things to keep in mind:
@@ -81,18 +82,20 @@ const updates = [
 ];
 
 export async function up(knex: Knex): Promise<void> {
-	const inspector = SchemaInspector(knex);
+	const logger = useLogger();
+
+	const inspector = createInspector(knex);
 
 	const foreignKeys = await inspector.foreignKeys();
 
 	for (const update of updates) {
 		for (const constraint of update.constraints) {
 			const existingForeignKey = foreignKeys.find(
-				(fk) =>
+				(fk: any) =>
 					fk.table === update.table &&
 					fk.column === constraint.column &&
 					fk.foreign_key_table === constraint.references.split('.')[0] &&
-					fk.foreign_key_column === constraint.references.split('.')[1]
+					fk.foreign_key_column === constraint.references.split('.')[1],
 			);
 
 			try {
@@ -108,7 +111,7 @@ export async function up(knex: Knex): Promise<void> {
 			 * MySQL won't delete the index when you drop the foreign key constraint. Gotta make
 			 * sure to clean those up as well
 			 */
-			if (knex.client.constructor.name === 'Client_MySQL') {
+			if (getDatabaseClient(knex) === 'mysql') {
 				try {
 					await knex.schema.alterTable(update.table, (table) => {
 						// Knex uses a default convention for index names: `table_column_type`
@@ -116,8 +119,9 @@ export async function up(knex: Knex): Promise<void> {
 					});
 				} catch (err: any) {
 					logger.warn(
-						`Couldn't clean up index for foreign key ${update.table}.${constraint.column}->${constraint.references}`
+						`Couldn't clean up index for foreign key ${update.table}.${constraint.column}->${constraint.references}`,
 					);
+
 					logger.warn(err);
 				}
 			}
@@ -135,6 +139,8 @@ export async function up(knex: Knex): Promise<void> {
 }
 
 export async function down(knex: Knex): Promise<void> {
+	const logger = useLogger();
+
 	for (const update of updates) {
 		for (const constraint of update.constraints) {
 			try {
@@ -150,7 +156,7 @@ export async function down(knex: Knex): Promise<void> {
 			 * MySQL won't delete the index when you drop the foreign key constraint. Gotta make
 			 * sure to clean those up as well
 			 */
-			if (knex.client.constructor.name === 'Client_MySQL') {
+			if (getDatabaseClient(knex) === 'mysql') {
 				try {
 					await knex.schema.alterTable(update.table, (table) => {
 						// Knex uses a default convention for index names: `table_column_type`
@@ -158,8 +164,9 @@ export async function down(knex: Knex): Promise<void> {
 					});
 				} catch (err: any) {
 					logger.warn(
-						`Couldn't clean up index for foreign key ${update.table}.${constraint.column}->${constraint.references}`
+						`Couldn't clean up index for foreign key ${update.table}.${constraint.column}->${constraint.references}`,
 					);
+
 					logger.warn(err);
 				}
 			}

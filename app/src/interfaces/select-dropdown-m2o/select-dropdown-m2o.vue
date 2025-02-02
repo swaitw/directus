@@ -1,468 +1,283 @@
+<script setup lang="ts">
+import { useRelationM2O } from '@/composables/use-relation-m2o';
+import { useRelationPermissionsM2O } from '@/composables/use-relation-permissions';
+import { RelationQuerySingle, useRelationSingle } from '@/composables/use-relation-single';
+import { useCollectionsStore } from '@/stores/collections';
+import { adjustFieldsForDisplays } from '@/utils/adjust-fields-for-displays';
+import { parseFilter } from '@/utils/parse-filter';
+import DrawerCollection from '@/views/private/components/drawer-collection.vue';
+import DrawerItem from '@/views/private/components/drawer-item.vue';
+import { Filter } from '@directus/types';
+import { deepMap, getFieldsFromTemplate } from '@directus/utils';
+import { get } from 'lodash';
+import { render } from 'micromustache';
+import { computed, inject, ref, toRefs } from 'vue';
+import { useI18n } from 'vue-i18n';
+import { getItemRoute } from '@/utils/get-route';
+
+const props = withDefaults(
+	defineProps<{
+		value?: number | string | Record<string, any> | null;
+		collection: string;
+		field: string;
+		template?: string | null;
+		selectMode?: 'auto' | 'dropdown' | 'modal';
+		disabled?: boolean;
+		filter?: Filter | null;
+		enableCreate?: boolean;
+		enableSelect?: boolean;
+		loading?: boolean;
+		enableLink?: boolean;
+	}>(),
+	{
+		value: null,
+		selectMode: 'auto',
+		disabled: false,
+		template: null,
+		filter: null,
+		enableCreate: true,
+		enableSelect: true,
+		enableLink: false,
+	},
+);
+
+const emit = defineEmits(['input']);
+
+const values = inject('values', ref<Record<string, any>>({}));
+
+const collectionsStore = useCollectionsStore();
+
+const customFilter = computed(() => {
+	return parseFilter(
+		deepMap(props.filter, (val: any) => {
+			if (val && typeof val === 'string') {
+				return render(val, values.value);
+			}
+
+			return val;
+		}),
+	);
+});
+
+const { t } = useI18n();
+const { collection, field } = toRefs(props);
+const { relationInfo } = useRelationM2O(collection, field);
+
+const value = computed({
+	get: () => props.value ?? null,
+	set: (value) => {
+		emit('input', value);
+	},
+});
+
+const selectModalActive = ref(false);
+const editModalActive = ref(false);
+
+const displayTemplate = computed(() => {
+	if (props.template) return props.template;
+
+	if (!relationInfo.value) return '';
+
+	const displayTemplate = collectionsStore.getCollection(relationInfo.value.relatedCollection.collection)?.meta
+		?.display_template;
+
+	return displayTemplate || `{{ ${relationInfo.value.relatedPrimaryKeyField.field || ''} }}`;
+});
+
+const requiredFields = computed(() => {
+	if (!displayTemplate.value || !relationInfo.value?.relatedCollection.collection) return [];
+
+	return adjustFieldsForDisplays(
+		getFieldsFromTemplate(displayTemplate.value),
+		relationInfo.value?.relatedCollection.collection,
+	);
+});
+
+const query = computed<RelationQuerySingle>(() => ({
+	fields: requiredFields.value,
+}));
+
+const { update, remove, displayItem, loading } = useRelationSingle(value, query, relationInfo, {
+	enabled: computed(() => !props.loading),
+});
+
+const { createAllowed } = useRelationPermissionsM2O(relationInfo);
+
+const currentPrimaryKey = computed<string | number>(() => {
+	if (!displayItem.value || !props.value || !relationInfo.value) return '+';
+
+	if (typeof props.value === 'number' || typeof props.value === 'string') {
+		return props.value;
+	}
+
+	return get(props.value, relationInfo.value.relatedPrimaryKeyField.field, '+');
+});
+
+const edits = computed(() => {
+	if (!props.value || typeof props.value !== 'object') return {};
+
+	return props.value;
+});
+
+function onPreviewClick() {
+	if (props.disabled) return;
+
+	// Prevent double dialog in case the edit dialog is already open
+	if (editModalActive.value === true) return;
+
+	if (props.enableSelect) {
+		selectModalActive.value = true;
+		return;
+	}
+
+	editModalActive.value = true;
+}
+
+function onDrawerItemInput(event: any) {
+	if (props.disabled) return;
+	update(event);
+}
+
+const selection = computed<(number | string)[]>(() => {
+	const pkField = relationInfo.value?.relatedPrimaryKeyField.field;
+
+	if (!props.value || !pkField) return [];
+
+	if (typeof props.value === 'object' && pkField in props.value) {
+		return [props.value[pkField]];
+	}
+
+	return [props.value];
+});
+
+function onSelection(selection: (number | string)[] | null) {
+	if (selection) {
+		if (selection[0]) {
+			update(selection[0]);
+		} else {
+			remove();
+		}
+	}
+
+	selectModalActive.value = false;
+}
+
+function getLinkForItem() {
+	if (!collection.value || !currentPrimaryKey.value || !relationInfo.value) return '';
+	return getItemRoute(relationInfo.value.relatedCollection.collection, currentPrimaryKey.value);
+}
+</script>
+
 <template>
-	<v-notice v-if="!relation" type="warning">
+	<v-notice v-if="!relationInfo" type="warning">
 		{{ t('relationship_not_setup') }}
+	</v-notice>
+	<v-notice v-else-if="relationInfo.relatedCollection.meta?.singleton" type="warning">
+		{{ t('no_singleton_relations') }}
 	</v-notice>
 	<v-notice v-else-if="!displayTemplate" type="warning">
 		{{ t('display_template_not_setup') }}
 	</v-notice>
-	<div v-else class="many-to-one">
-		<v-menu v-model="menuActive" attached :disabled="disabled">
-			<template #activator="{ active }">
-				<v-skeleton-loader v-if="loadingCurrent" type="input" />
-				<v-input
-					v-else
-					:active="active"
-					clickable
-					:placeholder="t('select_an_item')"
-					:disabled="disabled"
-					@click="onPreviewClick"
-				>
-					<template v-if="currentItem" #input>
-						<div class="preview">
-							<render-template
-								:collection="relatedCollection.collection"
-								:item="currentItem"
-								:template="displayTemplate"
-							/>
-						</div>
-					</template>
+	<v-notice v-else-if="!enableCreate && !enableSelect && !displayItem">
+		{{ t('no_items') }}
+	</v-notice>
 
-					<template v-if="!disabled" #append>
-						<template v-if="currentItem">
-							<v-icon v-tooltip="t('edit')" name="open_in_new" class="edit" @click.stop="editModalActive = true" />
-							<v-icon v-tooltip="t('deselect')" name="close" class="deselect" @click.stop="$emit('input', null)" />
-						</template>
-						<template v-else>
-							<v-icon v-tooltip="t('create_item')" class="add" name="add" @click.stop="editModalActive = true" />
-							<v-icon class="expand" :class="{ active }" name="expand_more" />
-						</template>
-					</template>
-				</v-input>
+	<div v-else class="many-to-one">
+		<v-skeleton-loader v-if="loading" type="input" />
+		<v-input
+			v-else
+			clickable
+			:placeholder="t(enableSelect ? 'select_an_item' : 'create_item')"
+			:disabled="disabled"
+			@click="onPreviewClick"
+		>
+			<template v-if="displayItem" #input>
+				<div class="preview">
+					<render-template
+						:collection="relationInfo.relatedCollection.collection"
+						:item="displayItem"
+						:template="displayTemplate"
+					/>
+				</div>
 			</template>
 
-			<v-list>
-				<template v-if="itemsLoading">
-					<v-list-item v-for="n in 10" :key="`loader-${n}`">
-						<v-list-item-content>
-							<v-skeleton-loader type="text" />
-						</v-list-item-content>
-					</v-list-item>
-				</template>
+			<template #append>
+				<div class="item-actions">
+					<template v-if="displayItem">
+						<router-link
+							v-if="enableLink"
+							v-tooltip="t('navigate_to_item')"
+							:to="getLinkForItem()"
+							class="item-link"
+							@click.stop
+						>
+							<v-icon name="launch" />
+						</router-link>
 
-				<template v-else>
-					<v-list-item
-						v-for="item in items"
-						:key="item[relatedPrimaryKeyField.field]"
-						:active="value === item[relatedPrimaryKeyField.field]"
-						clickable
-						@click="setCurrent(item)"
-					>
-						<v-list-item-content>
-							<render-template :collection="relatedCollection.collection" :template="displayTemplate" :item="item" />
-						</v-list-item-content>
-					</v-list-item>
-				</template>
-			</v-list>
-		</v-menu>
+						<v-icon v-if="!disabled" v-tooltip="t('edit_item')" name="edit" clickable @click="editModalActive = true" />
+
+						<v-remove
+							v-if="!disabled"
+							deselect
+							:item-info="relationInfo"
+							:item-edits="edits"
+							@action="$emit('input', null)"
+						/>
+					</template>
+
+					<template v-else>
+						<v-icon
+							v-if="createAllowed && enableCreate"
+							v-tooltip="t('create_item')"
+							class="add"
+							name="add"
+							@click="editModalActive = true"
+						/>
+
+						<v-icon v-if="enableSelect" class="expand" name="expand_more" />
+					</template>
+				</div>
+			</template>
+		</v-input>
 
 		<drawer-item
-			v-if="!disabled"
 			v-model:active="editModalActive"
-			:collection="relatedCollection.collection"
+			:collection="relationInfo.relatedCollection.collection"
 			:primary-key="currentPrimaryKey"
 			:edits="edits"
-			:circular-field="relation.meta?.one_field"
-			@input="stageEdits"
+			:circular-field="relationInfo.relation.meta?.one_field ?? undefined"
+			:disabled="disabled"
+			@input="onDrawerItemInput"
 		/>
 
 		<drawer-collection
 			v-if="!disabled"
 			v-model:active="selectModalActive"
-			:collection="relatedCollection.collection"
+			:collection="relationInfo.relatedCollection.collection"
 			:selection="selection"
-			@input="stageSelection"
+			:filter="customFilter"
+			@input="onSelection"
 		/>
 	</div>
 </template>
 
-<script lang="ts">
-import { useI18n } from 'vue-i18n';
-import { defineComponent, computed, ref, toRefs, watch, PropType } from 'vue';
-import { useCollectionsStore, useRelationsStore } from '@/stores/';
-import { useCollection } from '@directus/shared/composables';
-import { getFieldsFromTemplate } from '@directus/shared/utils';
-import api from '@/api';
-import DrawerItem from '@/views/private/components/drawer-item';
-import DrawerCollection from '@/views/private/components/drawer-collection';
-import { unexpectedError } from '@/utils/unexpected-error';
-import adjustFieldsForDisplays from '@/utils/adjust-fields-for-displays';
-
-/**
- * @NOTE
- *
- * The value of a many to one can be one of three things: A primary key (number/string), a nested
- * object of edits (including primary key = editing existing) or an object with new values (no
- * primary key)
- */
-
-export default defineComponent({
-	components: { DrawerItem, DrawerCollection },
-	props: {
-		value: {
-			type: [Number, String, Object],
-			default: null,
-		},
-		collection: {
-			type: String,
-			required: true,
-		},
-		field: {
-			type: String,
-			required: true,
-		},
-		template: {
-			type: String,
-			default: null,
-		},
-		selectMode: {
-			type: String as PropType<'auto' | 'dropdown' | 'modal'>,
-			default: 'auto',
-		},
-		disabled: {
-			type: Boolean,
-			default: false,
-		},
-	},
-	emits: ['input'],
-	setup(props, { emit }) {
-		const { t } = useI18n();
-
-		const { collection } = toRefs(props);
-
-		const relationsStore = useRelationsStore();
-		const collectionsStore = useCollectionsStore();
-
-		const { relation, relatedCollection, relatedPrimaryKeyField } = useRelation();
-		const { usesMenu, menuActive } = useMenu();
-		const { info: collectionInfo } = useCollection(collection);
-		const { selection, stageSelection, selectModalActive } = useSelection();
-		const { displayTemplate, onPreviewClick, requiredFields } = usePreview();
-		const { totalCount, loading: itemsLoading, fetchItems, items } = useItems();
-
-		const { setCurrent, currentItem, loading: loadingCurrent, currentPrimaryKey } = useCurrent();
-
-		const { edits, stageEdits } = useEdits();
-
-		const editModalActive = ref(false);
-
-		return {
-			t,
-			collectionInfo,
-			currentItem,
-			displayTemplate,
-			items,
-			itemsLoading,
-			loadingCurrent,
-			menuActive,
-			onPreviewClick,
-			relatedCollection,
-			relation,
-			selection,
-			selectModalActive,
-			setCurrent,
-			totalCount,
-			stageSelection,
-			useMenu,
-			currentPrimaryKey,
-			edits,
-			stageEdits,
-			editModalActive,
-			relatedPrimaryKeyField,
-		};
-
-		function useCurrent() {
-			const currentItem = ref<Record<string, any> | null>(null);
-			const loading = ref(false);
-
-			watch(
-				() => props.value,
-				(newValue) => {
-					// When the newly configured value is a primitive, assume it's the primary key
-					// of the item and fetch it from the API to render the preview
-					if (
-						newValue !== null &&
-						// eslint-disable-next-line @typescript-eslint/no-non-null-assertion
-						newValue !== currentItem.value?.[relatedPrimaryKeyField.value!.field] &&
-						(typeof newValue === 'string' || typeof newValue === 'number')
-					) {
-						fetchCurrent();
-					}
-
-					// If the value isn't a primary key, the current value will be set by the editing
-					// handlers in useEdit()
-
-					if (newValue === null) {
-						currentItem.value = null;
-					}
-				},
-				{ immediate: true }
-			);
-
-			const currentPrimaryKey = computed<string | number>(() => {
-				if (!currentItem.value) return '+';
-				if (!props.value) return '+';
-				if (!relatedPrimaryKeyField.value) return '+';
-
-				if (typeof props.value === 'number' || typeof props.value === 'string') {
-					return props.value!;
-				}
-
-				if (typeof props.value === 'object' && relatedPrimaryKeyField.value.field in (props.value ?? {})) {
-					return props.value?.[relatedPrimaryKeyField.value.field] ?? '+';
-				}
-
-				return '+';
-			});
-
-			return { setCurrent, currentItem, loading, currentPrimaryKey };
-
-			function setCurrent(item: Record<string, any>) {
-				if (!relatedPrimaryKeyField.value) return;
-				currentItem.value = item;
-				emit('input', item[relatedPrimaryKeyField.value.field]);
-			}
-
-			async function fetchCurrent() {
-				if (!relatedPrimaryKeyField.value || !relatedCollection.value) return;
-
-				loading.value = true;
-
-				const fields = requiredFields.value || [];
-
-				if (fields.includes(relatedPrimaryKeyField.value.field) === false) {
-					fields.push(relatedPrimaryKeyField.value.field);
-				}
-
-				try {
-					const endpoint = relatedCollection.value.collection.startsWith('directus_')
-						? `/${relatedCollection.value.collection.substring(9)}/${props.value}`
-						: `/items/${relatedCollection.value.collection}/${encodeURIComponent(props.value!)}`;
-
-					const response = await api.get(endpoint, {
-						params: {
-							fields: fields,
-						},
-					});
-
-					currentItem.value = response.data.data;
-				} catch (err: any) {
-					unexpectedError(err);
-				} finally {
-					loading.value = false;
-				}
-			}
-		}
-
-		function useItems() {
-			const totalCount = ref<number | null>(null);
-
-			const items = ref<Record<string, any>[] | null>(null);
-			const loading = ref(false);
-
-			watch(relatedCollection, () => {
-				fetchTotalCount();
-				items.value = null;
-			});
-
-			return { totalCount, fetchItems, items, loading };
-
-			async function fetchItems() {
-				if (items.value !== null) return;
-				if (!relatedCollection.value || !relatedPrimaryKeyField.value) return;
-
-				loading.value = true;
-
-				const fields = requiredFields.value || [];
-
-				if (fields.includes(relatedPrimaryKeyField.value.field) === false) {
-					fields.push(relatedPrimaryKeyField.value.field);
-				}
-
-				try {
-					const endpoint = relatedCollection.value.collection.startsWith('directus_')
-						? `/${relatedCollection.value.collection.substring(9)}`
-						: `/items/${relatedCollection.value.collection}`;
-
-					const response = await api.get(endpoint, {
-						params: {
-							fields: fields,
-							limit: -1,
-						},
-					});
-
-					items.value = response.data.data;
-				} catch (err: any) {
-					unexpectedError(err);
-				} finally {
-					loading.value = false;
-				}
-			}
-
-			async function fetchTotalCount() {
-				if (!relatedCollection.value) return;
-
-				const endpoint = relatedCollection.value.collection.startsWith('directus_')
-					? `/${relatedCollection.value.collection.substring(9)}`
-					: `/items/${relatedCollection.value.collection}`;
-
-				const response = await api.get(endpoint, {
-					params: {
-						limit: 0,
-						meta: 'total_count',
-					},
-				});
-
-				totalCount.value = response.data.meta.total_count;
-			}
-		}
-
-		function useRelation() {
-			const relation = computed(() => {
-				return relationsStore.getRelationsForField(props.collection, props.field)?.[0];
-			});
-
-			const relatedCollection = computed(() => {
-				if (!relation.value?.related_collection) return null;
-				return collectionsStore.getCollection(relation.value.related_collection)!;
-			});
-
-			const relatedCollectionName = computed(() => relatedCollection.value?.collection ?? null);
-
-			const { primaryKeyField: relatedPrimaryKeyField } = useCollection(relatedCollectionName);
-
-			return { relation, relatedCollection, relatedPrimaryKeyField };
-		}
-
-		function useMenu() {
-			const menuActive = ref(false);
-			const usesMenu = computed(() => {
-				if (props.selectMode === 'modal') return false;
-				if (props.selectMode === 'dropdown') return true;
-
-				// auto
-				if (totalCount.value !== null && totalCount.value <= 100) return true;
-				return false;
-			});
-
-			return { menuActive, usesMenu };
-		}
-
-		function usePreview() {
-			const displayTemplate = computed(() => {
-				if (props.template !== null) return props.template;
-				return collectionInfo.value?.meta?.display_template || `{{ ${relatedPrimaryKeyField?.value?.field || ''} }}`;
-			});
-
-			const requiredFields = computed(() => {
-				if (!displayTemplate.value || !relatedCollection.value) return null;
-
-				return adjustFieldsForDisplays(
-					getFieldsFromTemplate(displayTemplate.value),
-					relatedCollection.value.collection
-				);
-			});
-
-			return { onPreviewClick, displayTemplate, requiredFields };
-
-			function onPreviewClick() {
-				if (props.disabled) return;
-
-				if (usesMenu.value === true) {
-					const newActive = !menuActive.value;
-					menuActive.value = newActive;
-					if (newActive === true) fetchItems();
-				} else {
-					selectModalActive.value = true;
-				}
-			}
-		}
-
-		function useSelection() {
-			const selectModalActive = ref(false);
-
-			const selection = computed<(number | string)[]>(() => {
-				if (!props.value) return [];
-				if (!relatedPrimaryKeyField.value) return [];
-
-				if (typeof props.value === 'object' && relatedPrimaryKeyField.value.field in (props.value ?? {})) {
-					return [props.value![relatedPrimaryKeyField.value.field]];
-				}
-
-				if (typeof props.value === 'string' || typeof props.value === 'number') {
-					return [props.value!];
-				}
-
-				return [];
-			});
-
-			return { selection, stageSelection, selectModalActive };
-
-			function stageSelection(newSelection: (number | string)[]) {
-				if (newSelection.length === 0) {
-					emit('input', null);
-				} else {
-					emit('input', newSelection[0]);
-				}
-			}
-		}
-
-		function useEdits() {
-			const edits = computed(() => {
-				// If the current value isn't a primitive, it means we've already staged some changes
-				// This ensures we continue on those changes instead of starting over
-				if (props.value && typeof props.value === 'object') {
-					return props.value;
-				}
-
-				return {};
-			});
-
-			return { edits, stageEdits };
-
-			function stageEdits(newEdits: Record<string, any>) {
-				if (!relatedPrimaryKeyField.value) return;
-
-				// Make sure we stage the primary key if it exists. This is needed to have the API
-				// update the existing item instead of create a new one
-				if (currentPrimaryKey.value && currentPrimaryKey.value !== '+') {
-					emit('input', {
-						[relatedPrimaryKeyField.value.field]: currentPrimaryKey.value,
-						...newEdits,
-					});
-				} else {
-					if (relatedPrimaryKeyField.value.field in newEdits && newEdits[relatedPrimaryKeyField.value.field] === '+') {
-						delete newEdits[relatedPrimaryKeyField.value.field];
-					}
-
-					emit('input', newEdits);
-				}
-
-				currentItem.value = {
-					...currentItem.value,
-					...newEdits,
-				};
-			}
-		}
-	},
-});
-</script>
-
 <style lang="scss" scoped>
+@use '@/styles/mixins';
+
+.item-actions {
+	@include mixins.list-interface-item-actions($item-link: true);
+
+	.add:hover {
+		--v-icon-color: var(--theme--primary);
+	}
+}
+
 .many-to-one {
 	position: relative;
 
 	:deep(.v-input .append) {
 		display: flex;
+		gap: 4px;
 	}
 }
 
@@ -484,21 +299,5 @@ export default defineComponent({
 	&.active {
 		transform: scaleY(-1);
 	}
-}
-
-.edit {
-	margin-right: 4px;
-
-	&:hover {
-		--v-icon-color: var(--foreground-normal);
-	}
-}
-
-.add:hover {
-	--v-icon-color: var(--primary);
-}
-
-.deselect:hover {
-	--v-icon-color: var(--danger);
 }
 </style>

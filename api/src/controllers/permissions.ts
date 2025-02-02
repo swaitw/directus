@@ -1,11 +1,15 @@
+import { ErrorCode, ForbiddenError, isDirectusError } from '@directus/errors';
+import type { PrimaryKey } from '@directus/types';
 import express from 'express';
-import { ForbiddenException } from '../exceptions';
-import { respond } from '../middleware/respond';
-import useCollection from '../middleware/use-collection';
-import { validateBatch } from '../middleware/validate-batch';
-import { MetaService, PermissionsService } from '../services';
-import { PrimaryKey } from '../types';
-import asyncHandler from '../utils/async-handler';
+import getDatabase from '../database/index.js';
+import { respond } from '../middleware/respond.js';
+import useCollection from '../middleware/use-collection.js';
+import { validateBatch } from '../middleware/validate-batch.js';
+import { fetchAccountabilityCollectionAccess } from '../permissions/modules/fetch-accountability-collection-access/fetch-accountability-collection-access.js';
+import { MetaService } from '../services/meta.js';
+import { PermissionsService } from '../services/permissions.js';
+import asyncHandler from '../utils/async-handler.js';
+import { sanitizeQuery } from '../utils/sanitize-query.js';
 
 const router = express.Router();
 
@@ -32,21 +36,22 @@ router.post(
 		try {
 			if (Array.isArray(req.body)) {
 				const items = await service.readMany(savedKeys, req.sanitizedQuery);
-				res.locals.payload = { data: items };
+				res.locals['payload'] = { data: items };
 			} else {
-				const item = await service.readOne(savedKeys[0], req.sanitizedQuery);
-				res.locals.payload = { data: item };
+				const item = await service.readOne(savedKeys[0]!, req.sanitizedQuery);
+				res.locals['payload'] = { data: item };
 			}
 		} catch (error: any) {
-			if (error instanceof ForbiddenException) {
+			if (isDirectusError(error, ErrorCode.Forbidden)) {
 				return next();
 			}
 
 			throw error;
 		}
+
 		return next();
 	}),
-	respond
+	respond,
 );
 
 const readHandler = asyncHandler(async (req, res, next) => {
@@ -62,17 +67,21 @@ const readHandler = asyncHandler(async (req, res, next) => {
 
 	let result;
 
+	// TODO fix this at the service level
+	// temporary fix for missing permissions https://github.com/directus/directus/issues/18654
+	const temporaryQuery = { ...req.sanitizedQuery, limit: -1 };
+
 	if (req.singleton) {
-		result = await service.readSingleton(req.sanitizedQuery);
+		result = await service.readSingleton(temporaryQuery);
 	} else if (req.body.keys) {
-		result = await service.readMany(req.body.keys, req.sanitizedQuery);
+		result = await service.readMany(req.body.keys, temporaryQuery);
 	} else {
-		result = await service.readByQuery(req.sanitizedQuery);
+		result = await service.readByQuery(temporaryQuery);
 	}
 
-	const meta = await metaService.getMetaForQuery('directus_permissions', req.sanitizedQuery);
+	const meta = await metaService.getMetaForQuery('directus_permissions', temporaryQuery);
 
-	res.locals.payload = { data: result, meta };
+	res.locals['payload'] = { data: result, meta };
 	return next();
 });
 
@@ -80,20 +89,38 @@ router.get('/', validateBatch('read'), readHandler, respond);
 router.search('/', validateBatch('read'), readHandler, respond);
 
 router.get(
+	'/me',
+	asyncHandler(async (req, res, next) => {
+		if (!req.accountability?.user && !req.accountability?.role && !req.accountability?.share)
+			throw new ForbiddenError();
+
+		const result = await fetchAccountabilityCollectionAccess(req.accountability, {
+			schema: req.schema,
+			knex: getDatabase(),
+		});
+
+		res.locals['payload'] = { data: result };
+		return next();
+	}),
+	respond,
+);
+
+router.get(
 	'/:pk',
 	asyncHandler(async (req, res, next) => {
 		if (req.path.endsWith('me')) return next();
+
 		const service = new PermissionsService({
 			accountability: req.accountability,
 			schema: req.schema,
 		});
 
-		const record = await service.readOne(req.params.pk, req.sanitizedQuery);
+		const record = await service.readOne(req.params['pk']!, req.sanitizedQuery);
 
-		res.locals.payload = { data: record };
+		res.locals['payload'] = { data: record };
 		return next();
 	}),
-	respond
+	respond,
 );
 
 router.patch(
@@ -107,17 +134,20 @@ router.patch(
 
 		let keys: PrimaryKey[] = [];
 
-		if (req.body.keys) {
+		if (Array.isArray(req.body)) {
+			keys = await service.updateBatch(req.body);
+		} else if (req.body.keys) {
 			keys = await service.updateMany(req.body.keys, req.body.data);
 		} else {
-			keys = await service.updateByQuery(req.body.query, req.body.data);
+			const sanitizedQuery = sanitizeQuery(req.body.query, req.accountability);
+			keys = await service.updateByQuery(sanitizedQuery, req.body.data);
 		}
 
 		try {
 			const result = await service.readMany(keys, req.sanitizedQuery);
-			res.locals.payload = { data: result };
+			res.locals['payload'] = { data: result };
 		} catch (error: any) {
-			if (error instanceof ForbiddenException) {
+			if (isDirectusError(error, ErrorCode.Forbidden)) {
 				return next();
 			}
 
@@ -126,7 +156,7 @@ router.patch(
 
 		return next();
 	}),
-	respond
+	respond,
 );
 
 router.patch(
@@ -137,13 +167,13 @@ router.patch(
 			schema: req.schema,
 		});
 
-		const primaryKey = await service.updateOne(req.params.pk, req.body);
+		const primaryKey = await service.updateOne(req.params['pk']!, req.body);
 
 		try {
 			const item = await service.readOne(primaryKey, req.sanitizedQuery);
-			res.locals.payload = { data: item || null };
+			res.locals['payload'] = { data: item || null };
 		} catch (error: any) {
-			if (error instanceof ForbiddenException) {
+			if (isDirectusError(error, ErrorCode.Forbidden)) {
 				return next();
 			}
 
@@ -152,13 +182,13 @@ router.patch(
 
 		return next();
 	}),
-	respond
+	respond,
 );
 
 router.delete(
 	'/',
 	validateBatch('delete'),
-	asyncHandler(async (req, res, next) => {
+	asyncHandler(async (req, _res, next) => {
 		const service = new PermissionsService({
 			accountability: req.accountability,
 			schema: req.schema,
@@ -169,27 +199,47 @@ router.delete(
 		} else if (req.body.keys) {
 			await service.deleteMany(req.body.keys);
 		} else {
-			await service.deleteByQuery(req.body.query);
+			const sanitizedQuery = sanitizeQuery(req.body.query, req.accountability);
+			await service.deleteByQuery(sanitizedQuery);
 		}
 
 		return next();
 	}),
-	respond
+	respond,
 );
 
 router.delete(
 	'/:pk',
-	asyncHandler(async (req, res, next) => {
+	asyncHandler(async (req, _res, next) => {
 		const service = new PermissionsService({
 			accountability: req.accountability,
 			schema: req.schema,
 		});
 
-		await service.deleteOne(req.params.pk);
+		await service.deleteOne(req.params['pk']!);
 
 		return next();
 	}),
-	respond
+	respond,
+);
+
+router.get(
+	'/me/:collection/:pk?',
+	asyncHandler(async (req, res, next) => {
+		const { collection, pk } = req.params;
+
+		const service = new PermissionsService({
+			accountability: req.accountability,
+			schema: req.schema,
+		});
+
+		const itemPermissions = await service.getItemPermissions(collection!, pk);
+
+		res.locals['payload'] = { data: itemPermissions };
+
+		return next();
+	}),
+	respond,
 );
 
 export default router;

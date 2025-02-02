@@ -1,4 +1,4 @@
-import { defineDisplay } from '@directus/shared/utils';
+import { defineDisplay } from '@directus/extensions';
 import DisplayImage from './image.vue';
 
 export default defineDisplay({
@@ -6,6 +6,7 @@ export default defineDisplay({
 	name: '$t:displays.image.image',
 	description: '$t:displays.image.description',
 	types: ['uuid'],
+	localTypes: ['file'],
 	icon: 'insert_photo',
 	component: DisplayImage,
 	options: [

@@ -1,11 +1,12 @@
+import { isDirectusError } from '@directus/errors';
 import express from 'express';
-import { ForbiddenException, InvalidPayloadException } from '../exceptions';
-import { respond } from '../middleware/respond';
-import useCollection from '../middleware/use-collection';
-import { RelationsService } from '../services';
-import asyncHandler from '../utils/async-handler';
-import validateCollection from '../middleware/collection-exists';
 import Joi from 'joi';
+import { ErrorCode, InvalidPayloadError } from '@directus/errors';
+import validateCollection from '../middleware/collection-exists.js';
+import { respond } from '../middleware/respond.js';
+import useCollection from '../middleware/use-collection.js';
+import { RelationsService } from '../services/relations.js';
+import asyncHandler from '../utils/async-handler.js';
 
 const router = express.Router();
 
@@ -20,10 +21,10 @@ router.get(
 		});
 
 		const relations = await service.readAll();
-		res.locals.payload = { data: relations || null };
+		res.locals['payload'] = { data: relations || null };
 		return next();
 	}),
-	respond
+	respond,
 );
 
 router.get(
@@ -34,12 +35,13 @@ router.get(
 			accountability: req.accountability,
 			schema: req.schema,
 		});
-		const relations = await service.readAll(req.params.collection);
 
-		res.locals.payload = { data: relations || null };
+		const relations = await service.readAll(req.params['collection']);
+
+		res.locals['payload'] = { data: relations || null };
 		return next();
 	}),
-	respond
+	respond,
 );
 
 router.get(
@@ -51,12 +53,12 @@ router.get(
 			schema: req.schema,
 		});
 
-		const relation = await service.readOne(req.params.collection, req.params.field);
+		const relation = await service.readOne(req.params['collection']!, req.params['field']!);
 
-		res.locals.payload = { data: relation || null };
+		res.locals['payload'] = { data: relation || null };
 		return next();
 	}),
-	respond
+	respond,
 );
 
 const newRelationSchema = Joi.object({
@@ -82,16 +84,16 @@ router.post(
 		const { error } = newRelationSchema.validate(req.body);
 
 		if (error) {
-			throw new InvalidPayloadException(error.message);
+			throw new InvalidPayloadError({ reason: error.message });
 		}
 
 		await service.createOne(req.body);
 
 		try {
 			const createdRelation = await service.readOne(req.body.collection, req.body.field);
-			res.locals.payload = { data: createdRelation || null };
+			res.locals['payload'] = { data: createdRelation || null };
 		} catch (error: any) {
-			if (error instanceof ForbiddenException) {
+			if (isDirectusError(error, ErrorCode.Forbidden)) {
 				return next();
 			}
 
@@ -100,7 +102,7 @@ router.post(
 
 		return next();
 	}),
-	respond
+	respond,
 );
 
 const updateRelationSchema = Joi.object({
@@ -127,16 +129,16 @@ router.patch(
 		const { error } = updateRelationSchema.validate(req.body);
 
 		if (error) {
-			throw new InvalidPayloadException(error.message);
+			throw new InvalidPayloadError({ reason: error.message });
 		}
 
-		await service.updateOne(req.params.collection, req.params.field, req.body);
+		await service.updateOne(req.params['collection']!, req.params['field']!, req.body);
 
 		try {
-			const updatedField = await service.readOne(req.params.collection, req.params.field);
-			res.locals.payload = { data: updatedField || null };
+			const updatedField = await service.readOne(req.params['collection']!, req.params['field']!);
+			res.locals['payload'] = { data: updatedField || null };
 		} catch (error: any) {
-			if (error instanceof ForbiddenException) {
+			if (isDirectusError(error, ErrorCode.Forbidden)) {
 				return next();
 			}
 
@@ -145,21 +147,22 @@ router.patch(
 
 		return next();
 	}),
-	respond
+	respond,
 );
 
 router.delete(
 	'/:collection/:field',
 	validateCollection,
-	asyncHandler(async (req, res, next) => {
+	asyncHandler(async (req, _res, next) => {
 		const service = new RelationsService({
 			accountability: req.accountability,
 			schema: req.schema,
 		});
-		await service.deleteOne(req.params.collection, req.params.field);
+
+		await service.deleteOne(req.params['collection']!, req.params['field']!);
 		return next();
 	}),
-	respond
+	respond,
 );
 
 export default router;

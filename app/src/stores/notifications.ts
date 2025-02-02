@@ -1,17 +1,61 @@
-import { Notification, NotificationRaw } from '@/types';
+import api from '@/api';
+import { Snackbar, SnackbarRaw } from '@/types/notifications';
+import { Notification } from '@directus/types';
 import { reverse, sortBy } from 'lodash';
 import { nanoid } from 'nanoid';
 import { defineStore } from 'pinia';
+import { useUserStore } from './user';
 
 export const useNotificationsStore = defineStore({
 	id: 'notificationsStore',
 	state: () => ({
-		dialogs: [] as Notification[],
-		queue: [] as Notification[],
-		previous: [] as Notification[],
+		dialogs: [] as Snackbar[],
+		queue: [] as Snackbar[],
+		previous: [] as Snackbar[],
+		notifications: [] as Notification[],
+		unread: 0,
 	}),
 	actions: {
-		add(notification: NotificationRaw) {
+		async hydrate() {
+			const userStore = useUserStore();
+
+			if (userStore.currentUser && !('share' in userStore.currentUser)) {
+				await this.refreshUnreadCount();
+			}
+		},
+		async refreshUnreadCount() {
+			const userStore = useUserStore();
+
+			if (!userStore.currentUser || !('id' in userStore.currentUser)) return;
+
+			const countResponse = await api.get('/notifications', {
+				params: {
+					filter: {
+						_and: [
+							{
+								recipient: {
+									_eq: userStore.currentUser.id,
+								},
+							},
+							{
+								status: {
+									_eq: 'inbox',
+								},
+							},
+						],
+					},
+					aggregate: {
+						count: 'id',
+					},
+				},
+			});
+
+			this.unread = countResponse.data.data[0].count.id;
+		},
+		setUnreadCount(count: number) {
+			this.unread = count < 0 ? 0 : count;
+		},
+		add(notification: SnackbarRaw) {
 			const id = nanoid();
 			const timestamp = Date.now();
 
@@ -64,24 +108,25 @@ export const useNotificationsStore = defineStore({
 			if (toBeRemoved.dialog === true) this.dialogs = this.dialogs.filter((n) => n.id !== id);
 			else this.queue = this.queue.filter((n) => n.id !== id);
 		},
-		update(id: string, updates: Partial<Notification>) {
+		update(id: string, updates: Partial<Snackbar>) {
 			this.queue = this.queue.map(updateIfNeeded);
 			this.dialogs = this.dialogs.map(updateIfNeeded);
 			this.previous = this.queue.map(updateIfNeeded);
 
-			function updateIfNeeded(notification: Notification) {
+			function updateIfNeeded(notification: Snackbar) {
 				if (notification.id === id) {
 					return {
 						...notification,
 						...updates,
 					};
 				}
+
 				return notification;
 			}
 		},
 	},
 	getters: {
-		lastFour(): Notification[] {
+		lastFour(): Snackbar[] {
 			const all = [...this.queue, ...this.previous.filter((l) => l.dialog !== true)];
 			const chronologicalAll = reverse(sortBy(all, ['timestamp']));
 			const newestFour = chronologicalAll.slice(0, 4);

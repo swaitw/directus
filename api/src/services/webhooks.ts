@@ -1,82 +1,51 @@
-import { AbstractServiceOptions, Item, PrimaryKey } from '../types';
-import { register } from '../webhooks';
-import { ItemsService, MutationOptions } from './items';
+import { ErrorCode, createError, type DirectusError } from '@directus/errors';
+import type { Bus } from '@directus/memory';
+import type { PrimaryKey } from '@directus/types';
+import { useBus } from '../bus/index.js';
+import { useLogger } from '../logger/index.js';
+import type { AbstractServiceOptions, MutationOptions, Webhook } from '../types/index.js';
+import { ItemsService } from './items.js';
 
-export class WebhooksService extends ItemsService {
+const logger = useLogger();
+
+export class WebhooksService extends ItemsService<Webhook> {
+	messenger: Bus;
+	errorDeprecation: DirectusError;
+
 	constructor(options: AbstractServiceOptions) {
 		super('directus_webhooks', options);
+		this.messenger = useBus();
+
+		this.errorDeprecation = new (createError(
+			ErrorCode.MethodNotAllowed,
+			'Webhooks are deprecated, use Flows instead',
+			405,
+		))();
+
+		logger.warn(
+			'Webhooks are deprecated and the WebhooksService will be removed in an upcoming release. Creating/Updating Webhooks is disabled, use Flows instead',
+		);
 	}
 
-	async createOne(data: Partial<Item>, opts?: MutationOptions): Promise<PrimaryKey> {
-		const result = await super.createOne(data, opts);
-		await register();
-		return result;
+	override async createOne(): Promise<PrimaryKey> {
+		throw this.errorDeprecation;
 	}
 
-	async createMany(data: Partial<Item>[], opts?: MutationOptions): Promise<PrimaryKey[]> {
-		const result = await super.createMany(data, opts);
-		await register();
-		return result;
+	override async createMany(): Promise<PrimaryKey[]> {
+		throw this.errorDeprecation;
 	}
 
-	async updateOne(key: PrimaryKey, data: Partial<Item>, opts?: MutationOptions): Promise<PrimaryKey> {
-		const result = await super.updateOne(key, data, opts);
-		await register();
-		return result;
+	override async updateBatch(): Promise<PrimaryKey[]> {
+		throw this.errorDeprecation;
 	}
 
-	async updateMany(keys: PrimaryKey[], data: Partial<Item>, opts?: MutationOptions): Promise<PrimaryKey[]> {
-		const result = await super.updateMany(keys, data, opts);
-		await register();
-		return result;
+	override async updateMany(): Promise<PrimaryKey[]> {
+		throw this.errorDeprecation;
 	}
 
-	async deleteOne(key: PrimaryKey, opts?: MutationOptions): Promise<PrimaryKey> {
-		const result = await super.deleteOne(key, opts);
-		await register();
-		return result;
-	}
-
-	async deleteMany(keys: PrimaryKey[], opts?: MutationOptions): Promise<PrimaryKey[]> {
+	override async deleteMany(keys: PrimaryKey[], opts?: MutationOptions): Promise<PrimaryKey[]> {
 		const result = await super.deleteMany(keys, opts);
-		await register();
-		return result;
-	}
-
-	/**
-	 * @deprecated Use `createOne` or `createMany` instead
-	 */
-	async create(data: Partial<Item>[]): Promise<PrimaryKey[]>;
-	async create(data: Partial<Item>): Promise<PrimaryKey>;
-	async create(data: Partial<Item> | Partial<Item>[]): Promise<PrimaryKey | PrimaryKey[]> {
-		const result = await super.create(data);
-		await register();
-		return result;
-	}
-
-	/**
-	 * @deprecated Use `updateOne` or `updateMany` instead
-	 */
-	update(data: Partial<Item>, keys: PrimaryKey[]): Promise<PrimaryKey[]>;
-	update(data: Partial<Item>, key: PrimaryKey): Promise<PrimaryKey>;
-	update(data: Partial<Item>[]): Promise<PrimaryKey[]>;
-	async update(
-		data: Partial<Item> | Partial<Item>[],
-		key?: PrimaryKey | PrimaryKey[]
-	): Promise<PrimaryKey | PrimaryKey[]> {
-		const result = await super.update(data, key as any);
-		await register();
-		return result;
-	}
-
-	/**
-	 * @deprecated Use `deleteOne` or `deleteMany` instead
-	 */
-	delete(key: PrimaryKey): Promise<PrimaryKey>;
-	delete(keys: PrimaryKey[]): Promise<PrimaryKey[]>;
-	async delete(key: PrimaryKey | PrimaryKey[]): Promise<PrimaryKey | PrimaryKey[]> {
-		const result = await super.delete(key as any);
-		await register();
+		this.messenger.publish('webhooks', { type: 'reload' });
 		return result;
 	}
 }

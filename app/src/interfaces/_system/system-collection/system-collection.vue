@@ -1,3 +1,50 @@
+<script setup lang="ts">
+import { useCollectionsStore } from '@/stores/collections';
+import { computed } from 'vue';
+import { useI18n } from 'vue-i18n';
+
+const props = withDefaults(
+	defineProps<{
+		value: string | null;
+		disabled?: boolean;
+		includeSystem?: boolean;
+		includeSingleton?: boolean;
+	}>(),
+	{ includeSingleton: true },
+);
+
+defineEmits<{
+	(e: 'input', value: string | null): void;
+}>();
+
+const { t } = useI18n();
+
+const collectionsStore = useCollectionsStore();
+
+const collections = computed(() => {
+	let collections = collectionsStore.allCollections;
+
+	if (!props.includeSingleton) {
+		collections = collections.filter((collection) => collection?.meta?.singleton === false);
+	}
+
+	return [...collections, ...(props.includeSystem ? collectionsStore.crudSafeSystemCollections : [])];
+});
+
+const items = computed(() => {
+	return collections.value.reduce<{ text: string; value: string }[]>((acc, collection) => {
+		if (collection.type !== 'alias') {
+			acc.push({
+				text: collection.name,
+				value: collection.collection,
+			});
+		}
+
+		return acc;
+	}, []);
+});
+</script>
+
 <template>
 	<v-select
 		:model-value="value"
@@ -7,48 +54,3 @@
 		@update:model-value="$emit('input', $event)"
 	/>
 </template>
-
-<script lang="ts">
-import { defineComponent, computed } from 'vue';
-import { useCollectionsStore } from '@/stores/';
-import { useI18n } from 'vue-i18n';
-
-export default defineComponent({
-	props: {
-		value: {
-			type: String,
-			default: null,
-		},
-		disabled: {
-			type: Boolean,
-			default: false,
-		},
-		includeSystem: {
-			type: Boolean,
-			default: false,
-		},
-	},
-	emits: ['input'],
-	setup(props) {
-		const { t } = useI18n();
-
-		const collectionsStore = useCollectionsStore();
-
-		const collections = computed(() => {
-			return [
-				...collectionsStore.collections.filter((collection) => collection.collection.startsWith('directus_') === false),
-				...(props.includeSystem ? collectionsStore.crudSafeSystemCollections : []),
-			];
-		});
-
-		const items = computed(() => {
-			return collections.value.map((collection) => ({
-				text: collection.name,
-				value: collection.collection,
-			}));
-		});
-
-		return { items, t };
-	},
-});
-</script>

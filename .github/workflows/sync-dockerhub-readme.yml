@@ -4,20 +4,20 @@ on:
   push:
     branches:
       - main
-    paths: # ensures this workflow only runs when the readme.md or this file changes.
-      - 'readme.md'
-      - '.github/workflows/sync-dockerhub-readme.yml'
-  workflow_dispatch:
+    paths:
+      - readme.md
+      - .github/workflows/sync-dockerhub-readme.yml
 
 jobs:
-  sync-dockerhub-readme:
+  sync:
+    name: Sync
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v2
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
       - name: Sync Readme to Docker Hub
-        uses: peter-evans/dockerhub-description@v2
+        uses: peter-evans/dockerhub-description@v4
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_PASSWORD }}

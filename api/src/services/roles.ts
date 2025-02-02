@@ -1,133 +1,81 @@
-import { ForbiddenException, UnprocessableEntityException } from '../exceptions';
-import { AbstractServiceOptions, PrimaryKey, Query, Alterations, Item } from '../types';
-import { ItemsService, MutationOptions } from './items';
-import { PermissionsService } from './permissions';
-import { PresetsService } from './presets';
-import { UsersService } from './users';
+import { InvalidPayloadError } from '@directus/errors';
+import type { Item, PrimaryKey } from '@directus/types';
+import { clearSystemCache } from '../cache.js';
+import { fetchRolesTree } from '../permissions/lib/fetch-roles-tree.js';
+import type { AbstractServiceOptions, MutationOptions } from '../types/index.js';
+import { transaction } from '../utils/transaction.js';
+import { UserIntegrityCheckFlag } from '../utils/validate-user-count-integrity.js';
+import { ItemsService } from './items.js';
+import { AccessService } from './access.js';
+import { PresetsService } from './presets.js';
+import { UsersService } from './users.js';
 
 export class RolesService extends ItemsService {
 	constructor(options: AbstractServiceOptions) {
 		super('directus_roles', options);
 	}
 
-	private async checkForOtherAdminRoles(excludeKeys: PrimaryKey[]): Promise<void> {
-		// Make sure there's at least one admin role left after this deletion is done
-		const otherAdminRoles = await this.knex
-			.count('*', { as: 'count' })
-			.from('directus_roles')
-			.whereNotIn('id', excludeKeys)
-			.andWhere({ admin_access: true })
-			.first();
+	// No need to check user integrity in createOne, as the creation of a role itself does not influence the number of
+	// users, as the role of a user is actually updated in the UsersService on the user, which will make sure to
+	// initiate a user integrity check if necessary. Same goes for role nesting check as well as cache clearing.
 
-		const otherAdminRolesCount = +(otherAdminRoles?.count || 0);
-		if (otherAdminRolesCount === 0) throw new UnprocessableEntityException(`You can't delete the last admin role.`);
-	}
+	override async updateMany(
+		keys: PrimaryKey[],
+		data: Partial<Item>,
+		opts: MutationOptions = {},
+	): Promise<PrimaryKey[]> {
+		if ('parent' in data) {
+			// If the parent of a role changed we need to make a full integrity check.
+			// Anything related to policies will be checked in the AccessService, where the policies are attached to roles
+			opts.userIntegrityCheckFlags = UserIntegrityCheckFlag.All;
+			opts.onRequireUserIntegrityCheck?.(opts.userIntegrityCheckFlags);
 
-	private async checkForOtherAdminUsers(key: PrimaryKey, users: Alterations | Item[]): Promise<void> {
-		const role = await this.knex.select('admin_access').from('directus_roles').where('id', '=', key).first();
-
-		if (!role) throw new ForbiddenException();
-
-		// The users that will now be in this new non-admin role
-		let userKeys: PrimaryKey[] = [];
-
-		if (Array.isArray(users)) {
-			userKeys = users.map((user) => (typeof user === 'string' ? user : user.id)).filter((id) => id);
-		} else {
-			userKeys = users.update.map((user) => user.id).filter((id) => id);
+			await this.validateRoleNesting(keys as string[], data['parent']);
 		}
 
-		const usersThatWereInRoleBefore = (await this.knex.select('id').from('directus_users').where('role', '=', key)).map(
-			(user) => user.id
-		);
-		const usersThatAreRemoved = usersThatWereInRoleBefore.filter((id) => userKeys.includes(id) === false);
+		const result = await super.updateMany(keys, data, opts);
 
-		const usersThatAreAdded = Array.isArray(users) ? users : users.create;
-
-		// If the role the users are moved to is an admin-role, and there's at least 1 (new) admin
-		// user, we don't have to check for other admin
-		// users
-		if ((role.admin_access === true || role.admin_access === 1) && usersThatAreAdded.length > 0) return;
-
-		const otherAdminUsers = await this.knex
-			.count('*', { as: 'count' })
-			.from('directus_users')
-			.whereNotIn('directus_users.id', [...userKeys, ...usersThatAreRemoved])
-			.andWhere({ 'directus_roles.admin_access': true })
-			.leftJoin('directus_roles', 'directus_users.role', 'directus_roles.id')
-			.first();
-
-		const otherAdminUsersCount = +(otherAdminUsers?.count || 0);
-
-		if (otherAdminUsersCount === 0) {
-			throw new UnprocessableEntityException(`You can't remove the last admin user from the admin role.`);
+		// Only clear the permissions cache if the parent role has changed
+		// If anything policies related has changed, the cache will be cleared in the AccessService as well
+		if ('parent' in data) {
+			await this.clearCaches();
 		}
 
-		return;
+		return result;
 	}
 
-	async updateOne(key: PrimaryKey, data: Record<string, any>, opts?: MutationOptions): Promise<PrimaryKey> {
-		if ('admin_access' in data && data.admin_access === false) {
-			await this.checkForOtherAdminRoles([key]);
-		}
+	override async deleteMany(keys: PrimaryKey[], opts: MutationOptions = {}): Promise<PrimaryKey[]> {
+		opts.userIntegrityCheckFlags = UserIntegrityCheckFlag.All;
+		opts.onRequireUserIntegrityCheck?.(opts.userIntegrityCheckFlags);
 
-		if ('users' in data) {
-			await this.checkForOtherAdminUsers(key, data.users);
-		}
-
-		return super.updateOne(key, data, opts);
-	}
-
-	async updateMany(keys: PrimaryKey[], data: Record<string, any>, opts?: MutationOptions): Promise<PrimaryKey[]> {
-		if ('admin_access' in data && data.admin_access === false) {
-			await this.checkForOtherAdminRoles(keys);
-		}
-
-		return super.updateMany(keys, data, opts);
-	}
-
-	async deleteOne(key: PrimaryKey): Promise<PrimaryKey> {
-		await this.deleteMany([key]);
-		return key;
-	}
-
-	async deleteMany(keys: PrimaryKey[]): Promise<PrimaryKey[]> {
-		await this.checkForOtherAdminRoles(keys);
-
-		await this.knex.transaction(async (trx) => {
-			const itemsService = new ItemsService('directus_roles', {
+		await transaction(this.knex, async (trx) => {
+			const options: AbstractServiceOptions = {
 				knex: trx,
 				accountability: this.accountability,
 				schema: this.schema,
-			});
+			};
 
-			const permissionsService = new PermissionsService({
-				knex: trx,
-				accountability: this.accountability,
-				schema: this.schema,
-			});
-
-			const presetsService = new PresetsService({
-				knex: trx,
-				accountability: this.accountability,
-				schema: this.schema,
-			});
-
-			const usersService = new UsersService({
-				knex: trx,
-				accountability: this.accountability,
-				schema: this.schema,
-			});
+			const rolesItemsService = new ItemsService('directus_roles', options);
+			const rolesService = new RolesService(options);
+			const accessService = new AccessService(options);
+			const presetsService = new PresetsService(options);
+			const usersService = new UsersService(options);
 
 			// Delete permissions/presets for this role, suspend all remaining users in role
 
-			await permissionsService.deleteByQuery({
-				filter: { role: { _in: keys } },
-			});
+			await accessService.deleteByQuery(
+				{
+					filter: { role: { _in: keys } },
+				},
+				{ ...opts, bypassLimits: true },
+			);
 
-			await presetsService.deleteByQuery({
-				filter: { role: { _in: keys } },
-			});
+			await presetsService.deleteByQuery(
+				{
+					filter: { role: { _in: keys } },
+				},
+				{ ...opts, bypassLimits: true },
+			);
 
 			await usersService.updateByQuery(
 				{
@@ -136,26 +84,46 @@ export class RolesService extends ItemsService {
 				{
 					status: 'suspended',
 					role: null,
-				}
+				},
+				{ ...opts, bypassLimits: true },
 			);
 
-			await itemsService.deleteMany(keys);
+			// If the about to be deleted roles are the parent of other roles set those parents to null
+			// Use a newly created RolesService here that works within the current transaction
+			await rolesService.updateByQuery(
+				{
+					filter: { parent: { _in: keys } },
+				},
+				{ parent: null },
+			);
+
+			await rolesItemsService.deleteMany(keys, opts);
 		});
+
+		// Since nested roles could be updated, clear caches
+		await this.clearCaches();
 
 		return keys;
 	}
 
-	deleteByQuery(query: Query, opts?: MutationOptions): Promise<PrimaryKey[]> {
-		return super.deleteByQuery(query, opts);
+	private async validateRoleNesting(ids: string[], parent: string) {
+		if (ids.includes(parent)) {
+			throw new InvalidPayloadError({ reason: 'A role cannot be a parent of itself' });
+		}
+
+		const roles = await fetchRolesTree(parent, this.knex);
+
+		if (ids.some((id) => roles.includes(id))) {
+			// The role tree up from the parent already includes this role, so it would create a circular reference
+			throw new InvalidPayloadError({ reason: 'A role cannot have a parent that is already a descendant of itself' });
+		}
 	}
 
-	/**
-	 * @deprecated Use `deleteOne` or `deleteMany` instead
-	 */
-	delete(key: PrimaryKey): Promise<PrimaryKey>;
-	delete(keys: PrimaryKey[]): Promise<PrimaryKey[]>;
-	async delete(key: PrimaryKey | PrimaryKey[]): Promise<PrimaryKey | PrimaryKey[]> {
-		if (Array.isArray(key)) return await this.deleteMany(key);
-		return await this.deleteOne(key);
+	private async clearCaches(opts?: MutationOptions) {
+		await clearSystemCache({ autoPurgeCache: opts?.autoPurgeCache });
+
+		if (this.cache && opts?.autoPurgeCache !== false) {
+			await this.cache.clear();
+		}
 	}
 }

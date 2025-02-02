@@ -1,45 +1,70 @@
-<template>
-	<div class="calendar-layout">
-		<div ref="calendarElement" />
-	</div>
-</template>
+<script setup lang="ts">
+import { onMounted, onUnmounted, computed, ref } from 'vue';
+import { useI18n } from 'vue-i18n';
+import type { ShowSelect } from '@directus/extensions';
 
-<script lang="ts">
-import { defineComponent, onMounted, onUnmounted, PropType, ref } from 'vue';
+import '@fullcalendar/core';
 
-import '@fullcalendar/core/vdom';
-
-export default defineComponent({
+defineOptions({
 	inheritAttrs: false,
-	props: {
-		createCalendar: {
-			type: Function as PropType<(calendarElement: HTMLElement) => void>,
-			required: true,
-		},
-		destroyCalendar: {
-			type: Function as PropType<() => void>,
-			required: true,
-		},
-	},
-	setup(props) {
-		const calendarElement = ref<HTMLElement>();
+});
 
-		onMounted(() => {
-			props.createCalendar(calendarElement.value!);
-		});
+interface Props {
+	createCalendar: (calendarElement: HTMLElement) => void;
+	destroyCalendar: () => void;
+	itemCount: number | null;
+	totalCount: number | null;
+	isFiltered: boolean;
+	limit: number;
+	resetPresetAndRefresh: () => Promise<void>;
+	error?: any;
+	selectMode: boolean;
+	showSelect: ShowSelect;
+}
 
-		onUnmounted(() => {
-			props.destroyCalendar();
-		});
+const props = withDefaults(defineProps<Props>(), {
+	itemCount: undefined,
+	showSelect: 'none',
+});
 
-		return { calendarElement };
-	},
+defineEmits(['update:selection']);
+
+const { n, t } = useI18n();
+
+const calendarElement = ref<HTMLElement>();
+
+onMounted(() => {
+	props.createCalendar(calendarElement.value!);
+});
+
+onUnmounted(() => {
+	props.destroyCalendar();
+});
+
+const atLimit = computed(() => {
+	const count = (props.isFiltered ? props.itemCount : props.totalCount) ?? 0;
+	return count > props.limit;
 });
 </script>
 
+<template>
+	<div class="calendar-layout" :class="{ 'select-mode': selectMode, 'select-one': showSelect === 'one' }">
+		<v-notice v-if="atLimit" type="warning">
+			{{ t('dataset_too_large_currently_showing_n_items', { n: n(props.limit) }) }}
+		</v-notice>
+		<div v-if="!error" ref="calendarElement" />
+		<slot v-else name="error" :error="error" :reset="resetPresetAndRefresh" />
+	</div>
+</template>
+
 <style lang="scss" scoped>
 .calendar-layout {
+	height: calc(100% - calc(var(--header-bar-height) + 2 * 24px));
 	padding: var(--content-padding);
 	padding-top: 0;
+}
+
+.v-notice {
+	margin-bottom: 24px;
 }
 </style>

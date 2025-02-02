@@ -1,36 +1,201 @@
+<script setup lang="ts">
+import api from '@/api';
+import { useRelationM2O } from '@/composables/use-relation-m2o';
+import { useRelationPermissionsM2O } from '@/composables/use-relation-permissions';
+import { RelationQuerySingle, useRelationSingle } from '@/composables/use-relation-single';
+import { formatFilesize } from '@/utils/format-filesize';
+import { getAssetUrl } from '@/utils/get-asset-url';
+import { readableMimeType } from '@/utils/readable-mime-type';
+import DrawerItem from '@/views/private/components/drawer-item.vue';
+import FileLightbox from '@/views/private/components/file-lightbox.vue';
+import ImageEditor from '@/views/private/components/image-editor.vue';
+import type { File } from '@directus/types';
+import { computed, ref, toRefs } from 'vue';
+import { useI18n } from 'vue-i18n';
+
+const props = withDefaults(
+	defineProps<{
+		value: string | Record<string, any> | null;
+		disabled?: boolean;
+		loading?: boolean;
+		folder?: string;
+		collection: string;
+		field: string;
+		width: string;
+		crop?: boolean;
+		letterbox?: boolean;
+	}>(),
+	{
+		crop: true,
+	},
+);
+
+const emit = defineEmits<{
+	input: [value: string | Record<string, any> | null];
+}>();
+
+const value = computed({
+	get: () => props.value,
+	set: (value) => {
+		emit('input', value);
+	},
+});
+
+const query = ref<RelationQuerySingle>({
+	fields: ['id', 'title', 'width', 'height', 'filesize', 'type', 'filename_download', 'modified_on'],
+});
+
+const { collection, field } = toRefs(props);
+const { relationInfo } = useRelationM2O(collection, field);
+
+const {
+	displayItem: image,
+	loading,
+	update,
+	remove,
+	refresh,
+} = useRelationSingle<
+	Pick<File, 'id' | 'title' | 'width' | 'height' | 'filesize' | 'type' | 'filename_download' | 'modified_on'>
+>(value, query, relationInfo, { enabled: computed(() => !props.loading) });
+
+const isImage = ref(true);
+
+const { t, n, te } = useI18n();
+
+const lightboxActive = ref(false);
+const editDrawerActive = ref(false);
+const imageError = ref<string | null>(null);
+
+const src = computed(() => {
+	if (!image.value?.type) return null;
+
+	if (image.value.type.includes('svg')) {
+		return getAssetUrl(image.value.id);
+	}
+
+	if (image.value.type.includes('image')) {
+		const fit = props.crop ? 'cover' : 'contain';
+		const url = getAssetUrl(`${image.value.id}?key=system-large-${fit}&cache-buster=${image.value.modified_on}`);
+		return url;
+	}
+
+	return null;
+});
+
+const ext = computed(() => (image.value?.type ? readableMimeType(image.value.type, true) : 'unknown'));
+
+const meta = computed(() => {
+	if (!image.value) return null;
+	const { filesize, width, height, type } = image.value;
+
+	if (width && height) {
+		return `${n(width)}x${n(height)} • ${formatFilesize(filesize)} • ${type}`;
+	}
+
+	return `${formatFilesize(filesize)} • ${type}`;
+});
+
+const editImageDetails = ref(false);
+const editImageEditor = ref(false);
+
+async function imageErrorHandler() {
+	isImage.value = false;
+	if (!src.value) return;
+
+	try {
+		await api.get(src.value);
+	} catch (err: any) {
+		imageError.value = err.response?.data?.errors[0]?.extensions?.code;
+
+		if (!imageError.value || !te('errors.' + imageError.value)) {
+			imageError.value = 'UNKNOWN';
+		}
+	}
+}
+
+function onUpload(image: any) {
+	if (image?.id) update(image.id);
+}
+
+function deselect() {
+	remove();
+
+	loading.value = false;
+	lightboxActive.value = false;
+	editDrawerActive.value = false;
+	editImageDetails.value = false;
+	editImageEditor.value = false;
+}
+
+const edits = computed(() => {
+	if (!props.value || typeof props.value !== 'object') return {};
+
+	return props.value;
+});
+
+const { createAllowed, updateAllowed } = useRelationPermissionsM2O(relationInfo);
+</script>
+
 <template>
-	<div class="image">
+	<div class="image" :class="[width, { crop }]">
 		<v-skeleton-loader v-if="loading" type="input-tall" />
 
-		<v-notice v-else-if="disabled && !image" class="disabled-placeholder" center icon="block">
-			{{ t('disabled') }}
+		<v-notice v-else-if="disabled && !image" class="disabled-placeholder" center icon="hide_image">
+			{{ t('no_image_selected') }}
 		</v-notice>
 
-		<div v-else-if="image" class="image-preview" :class="{ 'is-svg': image.type && image.type.includes('svg') }">
-			<div v-if="imageError" class="image-error">
-				<v-icon large :name="imageError === 'UNKNOWN' ? 'error_outline' : 'info_outline'" />
+		<div v-else-if="image" class="image-preview">
+			<div v-if="imageError || !src" class="image-error">
+				<v-icon large :name="imageError === 'UNKNOWN' ? 'error' : 'info'" />
 
 				<span class="message">
-					{{ t(`errors.${imageError}`) }}
+					{{ src ? t(`errors.${imageError}`) : t('errors.UNSUPPORTED_MEDIA_TYPE') }}
 				</span>
 			</div>
-			<img v-else :src="src" alt="" role="presentation" @error="imageErrorHandler" />
+
+			<v-image
+				v-else-if="image.type?.startsWith('image') && isImage"
+				:src="src"
+				:class="{ 'is-letterbox': letterbox }"
+				:width="image.width"
+				:height="image.height"
+				alt=""
+				role="presentation"
+				@error="imageErrorHandler"
+			/>
+
+			<div v-else class="fallback">
+				<v-icon-file :ext="ext" />
+			</div>
 
 			<div class="shadow" />
 
-			<div v-if="!disabled" class="actions">
+			<div class="actions">
 				<v-button v-tooltip="t('zoom')" icon rounded @click="lightboxActive = true">
 					<v-icon name="zoom_in" />
 				</v-button>
-				<v-button v-tooltip="t('download')" icon rounded :href="downloadSrc" :download="image.filename_download">
-					<v-icon name="get_app" />
+
+				<v-button
+					v-tooltip="t('download')"
+					icon
+					rounded
+					:href="getAssetUrl(image.id, true)"
+					:download="image.filename_download"
+				>
+					<v-icon name="download" />
 				</v-button>
-				<v-button v-tooltip="t('edit')" icon rounded @click="editDrawerActive = true">
-					<v-icon name="open_in_new" />
-				</v-button>
-				<v-button v-tooltip="t('deselect')" icon rounded @click="deselect">
-					<v-icon name="close" />
-				</v-button>
+
+				<template v-if="!disabled">
+					<v-button v-tooltip="t('edit_item')" icon rounded @click="editImageDetails = true">
+						<v-icon name="edit" />
+					</v-button>
+
+					<v-button v-if="updateAllowed" v-tooltip="t('edit_image')" icon rounded @click="editImageEditor = true">
+						<v-icon name="tune" />
+					</v-button>
+
+					<v-remove button deselect :item-info="relationInfo" :item-edits="edits" @action="deselect" />
+				</template>
 			</div>
 
 			<div class="info">
@@ -39,218 +204,28 @@
 			</div>
 
 			<drawer-item
-				v-if="!disabled && image"
-				v-model:active="editDrawerActive"
+				v-if="image"
+				v-model:active="editImageDetails"
+				:disabled="disabled"
 				collection="directus_files"
 				:primary-key="image.id"
 				:edits="edits"
-				@input="stageEdits"
-			/>
+				@input="update"
+			>
+				<template #actions>
+					<v-button secondary rounded icon :download="image.filename_download" :href="getAssetUrl(image.id, true)">
+						<v-icon name="download" />
+					</v-button>
+				</template>
+			</drawer-item>
 
-			<file-lightbox :id="image.id" v-model="lightboxActive" />
+			<image-editor v-if="!disabled" :id="image.id" v-model="editImageEditor" @refresh="refresh" />
+
+			<file-lightbox v-model="lightboxActive" :file="image" />
 		</div>
-		<v-upload v-else from-library from-url :folder="folder" @input="setImage" />
+		<v-upload v-else from-library from-url :from-user="createAllowed" :folder="folder" @input="onUpload" />
 	</div>
 </template>
-
-<script lang="ts">
-import { useI18n } from 'vue-i18n';
-import { defineComponent, ref, watch, computed, PropType } from 'vue';
-import api from '@/api';
-import formatFilesize from '@/utils/format-filesize';
-import FileLightbox from '@/views/private/components/file-lightbox';
-import { nanoid } from 'nanoid';
-import { getRootPath } from '@/utils/get-root-path';
-import { unexpectedError } from '@/utils/unexpected-error';
-import { addTokenToURL } from '@/api';
-import DrawerItem from '@/views/private/components/drawer-item';
-
-type Image = {
-	id: string; // uuid
-	type: string;
-	filesize: number;
-	width: number;
-	height: number;
-	filename_download: string;
-};
-
-export default defineComponent({
-	components: { FileLightbox, DrawerItem },
-	props: {
-		value: {
-			type: [String, Object] as PropType<string | Record<string, any>>,
-			default: null,
-		},
-		disabled: {
-			type: Boolean,
-			default: false,
-		},
-		folder: {
-			type: String,
-			default: undefined,
-		},
-	},
-	emits: ['input'],
-	setup(props, { emit }) {
-		const { t, n, te } = useI18n();
-
-		const loading = ref(false);
-		const image = ref<Image | null>(null);
-		const lightboxActive = ref(false);
-		const editDrawerActive = ref(false);
-		const imageError = ref<string | null>(null);
-
-		const cacheBuster = ref(nanoid());
-
-		const src = computed(() => {
-			if (!image.value) return null;
-
-			if (image.value.type.includes('svg')) {
-				return addTokenToURL(getRootPath() + `assets/${image.value.id}`);
-			}
-			if (image.value.type.includes('image')) {
-				const url = getRootPath() + `assets/${image.value.id}?key=system-large-cover&cache-buster=${cacheBuster.value}`;
-				return addTokenToURL(url);
-			}
-
-			return null;
-		});
-
-		const downloadSrc = computed(() => {
-			if (!image.value) return null;
-			return addTokenToURL(getRootPath() + `assets/${image.value.id}`);
-		});
-
-		const meta = computed(() => {
-			if (!image.value) return null;
-			const { filesize, width, height, type } = image.value;
-
-			if (width && height) {
-				return `${n(width)}x${n(height)} • ${formatFilesize(filesize)} • ${type}`;
-			}
-
-			return `${formatFilesize(filesize)} • ${type}`;
-		});
-
-		watch(
-			() => props.value,
-			(newValue, oldValue) => {
-				if (newValue === oldValue) return;
-
-				if (newValue) {
-					fetchImage();
-				}
-
-				if (oldValue && newValue === null) {
-					deselect();
-				}
-			},
-			{ immediate: true }
-		);
-
-		const { edits, stageEdits } = useEdits();
-
-		return {
-			t,
-			loading,
-			image,
-			src,
-			imageError,
-			imageErrorHandler,
-			meta,
-			lightboxActive,
-			editDrawerActive,
-			changeCacheBuster,
-			setImage,
-			deselect,
-			downloadSrc,
-			edits,
-			stageEdits,
-		};
-
-		async function fetchImage() {
-			loading.value = true;
-
-			try {
-				const id = typeof props.value === 'string' ? props.value : props.value?.id;
-
-				const response = await api.get(`/files/${id}`, {
-					params: {
-						fields: ['id', 'title', 'width', 'height', 'filesize', 'type', 'filename_download'],
-					},
-				});
-
-				if (props.value !== null && typeof props.value === 'object') {
-					image.value = {
-						...response.data.data,
-						...props.value,
-					};
-				} else {
-					image.value = response.data.data;
-				}
-			} catch (err: any) {
-				unexpectedError(err);
-			} finally {
-				loading.value = false;
-			}
-		}
-
-		async function imageErrorHandler() {
-			if (!src.value) return;
-			try {
-				await api.get(src.value);
-			} catch (err: any) {
-				imageError.value = err.response?.data?.errors[0]?.extensions?.code;
-
-				if (!imageError.value || !te('errors.' + imageError.value)) {
-					imageError.value = 'UNKNOWN';
-				}
-			}
-		}
-
-		function changeCacheBuster() {
-			cacheBuster.value = nanoid();
-		}
-
-		function setImage(data: Image) {
-			image.value = data;
-			emit('input', data.id);
-		}
-
-		function deselect() {
-			emit('input', null);
-
-			loading.value = false;
-			image.value = null;
-			lightboxActive.value = false;
-			editDrawerActive.value = false;
-		}
-
-		function useEdits() {
-			const edits = computed(() => {
-				// If the current value isn't a primitive, it means we've already staged some changes
-				// This ensures we continue on those changes instead of starting over
-				if (props.value && typeof props.value === 'object') {
-					return props.value;
-				}
-
-				return {};
-			});
-
-			return { edits, stageEdits };
-
-			function stageEdits(newEdits: Record<string, any>) {
-				if (!image.value) return;
-
-				emit('input', {
-					id: image.value.id,
-					...newEdits,
-				});
-			}
-		}
-	},
-});
-</script>
 
 <style lang="scss" scoped>
 .image-preview {
@@ -258,24 +233,20 @@ export default defineComponent({
 	width: 100%;
 	height: var(--input-height-tall);
 	overflow: hidden;
-	background-color: var(--background-subdued);
-	border-radius: var(--border-radius);
+	background-color: var(--theme--background-normal);
+	border-radius: var(--theme--border-radius);
 }
 
 img {
 	z-index: 1;
 	width: 100%;
 	height: 100%;
-	object-fit: cover;
+	max-height: inherit;
+	object-fit: contain;
 }
 
-.is-svg {
+.is-letterbox {
 	padding: 32px;
-	background-color: var(--background-normal-alt);
-
-	img {
-		object-fit: contain;
-	}
 }
 
 .image-error {
@@ -283,10 +254,10 @@ img {
 	flex-direction: column;
 	align-items: center;
 	justify-content: center;
-	// width: 100%;
 	height: 100%;
-	color: var(--foreground-subdued);
-	background-color: var(--background-normal);
+	color: var(--theme--form--field--input--foreground-subdued);
+	background-color: var(--theme--background-normal);
+	padding: 32px;
 
 	.v-icon {
 		margin-bottom: 6px;
@@ -299,83 +270,82 @@ img {
 	}
 }
 
-.shadow {
-	position: absolute;
-	bottom: 0;
-	left: 0;
-	z-index: 2;
-	width: 100%;
-	height: 40px;
-	overflow: hidden;
-	line-height: 1;
-	white-space: nowrap;
-	text-overflow: ellipsis;
-	background: linear-gradient(180deg, rgba(38, 50, 56, 0) 0%, rgba(38, 50, 56, 0.25) 100%);
-	transition: height var(--fast) var(--transition);
-}
+.image-preview {
+	.shadow {
+		position: absolute;
+		bottom: 0;
+		left: 0;
+		z-index: 2;
+		width: 100%;
+		height: 40px;
+		overflow: hidden;
+		line-height: 1;
+		white-space: nowrap;
+		text-overflow: ellipsis;
+		background: linear-gradient(180deg, rgb(38 50 56 / 0) 0%, rgb(38 50 56 / 0.25) 100%);
+		transition: height var(--fast) var(--transition);
+	}
 
-.actions {
-	--v-button-color: var(--foreground-subdued);
-	--v-button-background-color: var(--white);
-	--v-button-color-hover: var(--foreground-normal);
-	--v-button-background-color-hover: var(--white);
+	.actions {
+		--v-button-color: var(--theme--form--field--input--foreground-subdued);
+		--v-button-background-color: var(--white);
+		--v-button-color-hover: var(--theme--form--field--input--foreground);
+		--v-button-background-color-hover: var(--white);
 
-	position: absolute;
-	top: 30%;
-	left: 0;
-	z-index: 3;
-	display: flex;
-	justify-content: center;
-	width: 100%;
+		position: absolute;
+		top: calc(50% - 32px);
+		left: 0;
+		z-index: 3;
+		display: flex;
+		justify-content: center;
+		width: 100%;
+		gap: 12px;
 
-	.v-button {
-		margin-right: 12px;
-		transform: translateY(10px);
-		opacity: 0;
-		transition: var(--medium) var(--transition);
-		transition-property: opacity transform;
+		::v-deep(.v-button) {
+			transform: translateY(10px);
+			opacity: 0;
+			transition: var(--medium) var(--transition);
+			transition-property: opacity transform;
 
-		@for $i from 0 through 4 {
-			&:nth-of-type(#{$i + 1}) {
-				transition-delay: $i * 25ms;
+			@for $i from 0 through 4 {
+				&:nth-of-type(#{$i + 1}) {
+					transition-delay: $i * 25ms;
+				}
 			}
 		}
 	}
 
-	.v-button:last-child {
-		margin-right: 0px;
+	.info {
+		position: absolute;
+		bottom: 0;
+		left: 0;
+		z-index: 3;
+		width: 100%;
+		padding: 8px 12px;
+		line-height: 1.2;
+	}
+
+	.title {
+		color: var(--white);
+	}
+
+	.meta {
+		height: 17px;
+		max-height: 0;
+		overflow: hidden;
+		color: rgb(255 255 255 / 0.75);
+		transition: max-height var(--fast) var(--transition);
 	}
 }
 
-.info {
-	position: absolute;
-	bottom: 0;
-	left: 0;
-	z-index: 3;
-	width: 100%;
-	padding: 8px 12px;
-	line-height: 1.2;
-}
-
-.title {
-	color: var(--white);
-}
-
-.meta {
-	height: 17px;
-	max-height: 0;
-	overflow: hidden;
-	color: rgba(255, 255, 255, 0.75);
-	transition: max-height var(--fast) var(--transition);
-}
-
+.image-preview:focus-within,
 .image-preview:hover {
 	.shadow {
 		height: 100%;
-		background: linear-gradient(180deg, rgba(38, 50, 56, 0) 0%, rgba(38, 50, 56, 0.5) 100%);
+		background: linear-gradient(180deg, rgb(38 50 56 / 0) 0%, rgb(38 50 56 / 0.5) 100%);
 	}
 
-	.actions .v-button {
+	.actions ::v-deep(.v-button) {
 		transform: translateY(0px);
 		opacity: 1;
 	}
@@ -385,7 +355,34 @@ img {
 	}
 }
 
+.image {
+	&.full,
+	&.fill {
+		.image-preview {
+			height: auto;
+			max-height: 400px;
+		}
+	}
+
+	&.crop {
+		.image-preview {
+			img {
+				object-fit: cover;
+			}
+		}
+	}
+}
+
 .disabled-placeholder {
 	height: var(--input-height-tall);
+}
+
+.fallback {
+	background-color: var(--theme--background-normal);
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	height: var(--input-height-tall);
+	border-radius: var(--theme--border-radius);
 }
 </style>

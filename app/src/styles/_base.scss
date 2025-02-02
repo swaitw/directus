@@ -1,4 +1,4 @@
-@import './mixins/form-grid.scss';
+@use 'mixins';
 
 *:not(svg *) {
 	box-sizing: border-box;
@@ -18,13 +18,13 @@ html {
 }
 
 body {
-	color: var(--foreground-normal);
+	color: var(--theme--foreground);
 	font-weight: 500;
 	font-size: 14px;
-	font-family: var(--family-sans-serif);
+	font-family: var(--theme--fonts--sans--font-family);
 	font-style: normal;
 	line-height: 22px;
-	background-color: var(--background-page);
+	background-color: var(--theme--background);
 	-webkit-font-smoothing: antialiased;
 	text-rendering: optimizeLegibility;
 	-moz-osx-font-smoothing: grayscale;
@@ -58,13 +58,13 @@ textarea,
 .selectable {
 	user-select: text;
 
-	/* stylelint-disable no-descending-specificity */
-
 	* {
 		user-select: text;
 	}
+}
 
-	/* stylelint-enable no-descending-specificity */
+::placeholder {
+	opacity: 1;
 }
 
 :invalid {
@@ -107,8 +107,12 @@ strong {
 	font-weight: 600;
 }
 
+code {
+	font-family: var(--theme--fonts--monospace--font-family);
+}
+
 ::selection {
-	background: #e1f0fa;
+	background: var(--theme--background-accent);
 }
 
 dl > div {
@@ -130,15 +134,23 @@ dt {
 dd {
 	flex-grow: 1;
 	overflow: hidden;
-	color: var(--foreground-subdued);
+	color: var(--theme--foreground-subdued);
 	white-space: nowrap;
 	text-overflow: ellipsis;
 }
 
 dd a {
-	color: var(--primary);
+	color: var(--theme--primary);
 }
 
 .form-grid {
-	@include form-grid;
+	@include mixins.form-grid;
+}
+
+input[type='number']::-webkit-inner-spin-button,
+input[type='search']::-webkit-search-decoration,
+input[type='search']::-webkit-search-cancel-button,
+input[type='search']::-webkit-search-results-button,
+input[type='search']::-webkit-search-results-decoration {
+	-webkit-appearance: none;
 }

@@ -1,5 +1,3 @@
-import { OpenAPIObject } from 'openapi3-ts';
+import type { OpenAPIObject } from 'openapi3-ts/oas30';
 
-declare const DirectusSpec: OpenAPIObject;
-
-export default DirectusSpec;
+export const spec: OpenAPIObject;

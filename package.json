@@ -1,80 +1,30 @@
 {
 	"name": "directus-monorepo",
 	"private": true,
-	"workspaces": [
-		"./app",
-		"./api",
-		"./docs",
-		"./packages/*"
-	],
+	"homepage": "https://directus.io",
+	"type": "module",
 	"scripts": {
-		"lint": "npm-run-all --parallel --continue-on-error lint:*",
-		"lint:eslint": "eslint .",
-		"lint:stylelint": "stylelint \"**/*.{css,scss,vue}\"",
-		"format": "prettier --write \"**/*.{js,ts,vue,md,yaml}\"",
-		"dev": "lerna run dev --stream --parallel",
-		"build": "lerna run build",
-		"pack": "node docker/pack",
-		"release": "lerna version --force-publish --exact",
-		"test": "lerna run test",
-		"test:e2e": "jest tests -c tests/jest.config.js",
-		"test:e2e:watch": "npm run test:e2e -- --watch",
-		"posttest:e2e:watch": "ts-node --project ./tests/tsconfig.json --transpile-only ./tests/setup/teardown.ts",
-		"cli": "cross-env NODE_ENV=development SERVE_APP=false DOTENV_CONFIG_PATH=api/.env ts-node -r dotenv/config --script-mode --transpile-only api/src/cli/run.ts"
-	},
-	"engines": {
-		"node": ">=16.0.0",
-		"npm": ">=7.0.0"
+		"build": "pnpm --recursive --filter '!docs' run build",
+		"format": "prettier --cache --check .",
+		"lint": "eslint --cache .",
+		"test": "pnpm --recursive --filter '!tests-blackbox' test",
+		"test:blackbox": "pnpm --filter directus deploy --prod dist && pnpm --filter tests-blackbox test"
 	},
 	"devDependencies": {
-		"@types/dockerode": "3.2.7",
-		"@types/jest": "27.0.2",
-		"@types/listr": "0.14.4",
-		"@types/node": "15.12.2",
-		"@types/supertest": "2.0.11",
-		"@typescript-eslint/eslint-plugin": "4.33.0",
-		"@typescript-eslint/parser": "4.33.0",
-		"axios": "0.22.0",
-		"dockerode": "3.3.1",
-		"eslint": "7.32.0",
-		"eslint-config-prettier": "8.3.0",
-		"eslint-plugin-prettier": "4.0.0",
-		"eslint-plugin-vue": "7.19.0",
-		"globby": "11.0.4",
-		"jest": "27.2.4",
-		"knex": "0.95.11",
-		"lerna": "4.0.0",
-		"lint-staged": "11.2.0",
-		"listr": "0.14.3",
-		"mysql": "2.18.1",
-		"nanoid": "3.1.28",
-		"npm-run-all": "4.1.5",
-		"oracledb": "5.2.0",
-		"pg": "8.7.1",
-		"prettier": "2.4.1",
-		"simple-git-hooks": "2.6.1",
-		"sqlite3": "5.0.2",
-		"stylelint": "13.13.1",
-		"stylelint-config-prettier": "8.0.2",
-		"stylelint-config-rational-order": "0.1.2",
-		"stylelint-config-standard": "22.0.0",
-		"stylelint-order": "4.1.0",
-		"stylelint-scss": "3.21.0",
-		"supertest": "6.1.6",
-		"tedious": "13.0.4",
-		"ts-jest": "27.0.5",
-		"ts-node": "10.2.1"
+		"@changesets/cli": "2.27.11",
+		"@directus/release-notes-generator": "workspace:*",
+		"@eslint/js": "9.17.0",
+		"eslint": "9.17.0",
+		"eslint-config-prettier": "9.1.0",
+		"eslint-plugin-vue": "9.32.0",
+		"globals": "15.14.0",
+		"prettier": "3.1.0",
+		"typescript": "5.7.3",
+		"typescript-eslint": "8.19.1"
 	},
-	"simple-git-hooks": {
-		"pre-commit": "npx lint-staged"
-	},
-	"lint-staged": {
-		"*.{js,ts,vue}": "eslint --fix",
-		"*.{md,yaml}": "prettier --write",
-		"*.{css,scss,vue}": "stylelint --fix"
-	},
-	"volta": {
-		"node": "16.5.0",
-		"npm": "7.24.2"
+	"packageManager": "pnpm@9.15.3",
+	"engines": {
+		"node": "22",
+		"pnpm": "9"
 	}
 }

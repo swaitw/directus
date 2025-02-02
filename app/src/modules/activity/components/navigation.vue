@@ -1,6 +1,39 @@
+<script setup lang="ts">
+import { useUserStore } from '@/stores/user';
+import { Filter } from '@directus/types';
+import { computed } from 'vue';
+import { useI18n } from 'vue-i18n';
+
+const props = defineProps<{
+	filter?: Filter;
+}>();
+
+const emit = defineEmits(['update:filter']);
+
+const { t } = useI18n();
+
+const userStore = useUserStore();
+const currentUserID = computed(() => userStore.currentUser?.id);
+
+const filterField = computed(() => Object.keys(props.filter ?? {})[0] ?? null);
+const filterValue = computed(() => Object.values(props.filter ?? {})[0]?._eq ?? null);
+
+function setNavFilter(key: string, value: any) {
+	emit('update:filter', {
+		[key]: {
+			_eq: value,
+		},
+	});
+}
+
+function clearNavFilter() {
+	emit('update:filter', null);
+}
+</script>
+
 <template>
-	<v-list large>
-		<v-list-item clickable :active="!activeFilter" @click="clearNavFilter">
+	<v-list nav>
+		<v-list-item clickable :active="!filterField" @click="clearNavFilter">
 			<v-list-item-icon>
 				<v-icon name="access_time" />
 			</v-list-item-icon>
@@ -11,7 +44,7 @@
 
 		<v-list-item
 			clickable
-			:active="activeFilter && activeFilter.field === 'user' && activeFilter.value === currentUserID"
+			:active="filterField === 'user' && filterValue === currentUserID"
 			@click="setNavFilter('user', currentUserID)"
 		>
 			<v-list-item-icon>
@@ -26,7 +59,7 @@
 
 		<v-list-item
 			clickable
-			:active="activeFilter && activeFilter.field === 'action' && activeFilter.value === 'create'"
+			:active="filterField === 'action' && filterValue === 'create'"
 			@click="setNavFilter('action', 'create')"
 		>
 			<v-list-item-icon>
@@ -39,7 +72,7 @@
 
 		<v-list-item
 			clickable
-			:active="activeFilter && activeFilter.field === 'action' && activeFilter.value === 'update'"
+			:active="filterField === 'action' && filterValue === 'update'"
 			@click="setNavFilter('action', 'update')"
 		>
 			<v-list-item-icon>
@@ -52,7 +85,7 @@
 
 		<v-list-item
 			clickable
-			:active="activeFilter && activeFilter.field === 'action' && activeFilter.value === 'delete'"
+			:active="filterField === 'action' && filterValue === 'delete'"
 			@click="setNavFilter('action', 'delete')"
 		>
 			<v-list-item-icon>
@@ -65,7 +98,7 @@
 
 		<v-list-item
 			clickable
-			:active="activeFilter && activeFilter.field === 'action' && activeFilter.value === 'comment'"
+			:active="filterField === 'action' && filterValue === 'comment'"
 			@click="setNavFilter('action', 'comment')"
 		>
 			<v-list-item-icon>
@@ -78,7 +111,7 @@
 
 		<v-list-item
 			clickable
-			:active="activeFilter && activeFilter.field === 'action' && activeFilter.value === 'login'"
+			:active="filterField === 'action' && filterValue === 'login'"
 			@click="setNavFilter('action', 'login')"
 		>
 			<v-list-item-icon>
@@ -90,57 +123,3 @@
 		</v-list-item>
 	</v-list>
 </template>
-
-<script lang="ts">
-import { useI18n } from 'vue-i18n';
-import { defineComponent, computed, PropType } from 'vue';
-import { useUserStore } from '@/stores/user';
-import { nanoid } from 'nanoid';
-import { Filter } from '@directus/shared/types';
-
-export default defineComponent({
-	props: {
-		filters: {
-			type: Array as PropType<Filter[]>,
-			required: true,
-		},
-	},
-	emits: ['update:filters'],
-	setup(props, { emit }) {
-		const { t } = useI18n();
-
-		const userStore = useUserStore();
-		const currentUserID = computed(() => userStore.currentUser?.id);
-
-		const activeFilter = computed(() => {
-			return props.filters.find((filter) => filter.locked === true);
-		});
-
-		return { t, currentUserID, setNavFilter, clearNavFilter, activeFilter };
-
-		function setNavFilter(key: string, value: any) {
-			emit('update:filters', [
-				...props.filters.filter((filter) => {
-					return filter.locked === false;
-				}),
-				{
-					key: nanoid(),
-					locked: true,
-					field: key,
-					operator: 'eq',
-					value: value,
-				},
-			]);
-		}
-
-		function clearNavFilter() {
-			emit(
-				'update:filters',
-				props.filters.filter((filter) => {
-					return filter.locked === false;
-				})
-			);
-		}
-	},
-});
-</script>

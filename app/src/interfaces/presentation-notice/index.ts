@@ -1,5 +1,6 @@
-import { defineInterface } from '@directus/shared/utils';
+import { defineInterface } from '@directus/extensions';
 import InterfacePresentationNotice from './presentation-notice.vue';
+import PreviewSVG from './preview.svg?raw';
 
 export default defineInterface({
 	id: 'presentation-notice',
@@ -9,8 +10,10 @@ export default defineInterface({
 	component: InterfacePresentationNotice,
 	hideLabel: true,
 	hideLoader: true,
+	autoKey: true,
 	types: ['alias'],
-	groups: ['presentation'],
+	localTypes: ['presentation'],
+	group: 'presentation',
 	options: [
 		{
 			field: 'color',
@@ -48,11 +51,12 @@ export default defineInterface({
 			type: 'string',
 			meta: {
 				width: 'full',
-				interface: 'input-multiline',
+				interface: 'system-input-translated-string',
 				options: {
 					placeholder: '$t:interfaces.presentation-notice.text',
 				},
 			},
 		},
 	],
+	preview: PreviewSVG,
 });

@@ -1,188 +1,213 @@
-import { useFieldsStore, useRelationsStore } from '@/stores/';
-import { Field, Relation } from '@directus/shared/types';
-import { getRelationType } from '@directus/shared/utils';
-import { get, set } from 'lodash';
-import { computed, Ref, ref, ComputedRef } from 'vue';
+import { useFieldsStore } from '@/stores/fields';
+import { useRelationsStore } from '@/stores/relations';
+import { Field, Relation, Type } from '@directus/types';
+import { getRelationType } from '@directus/utils';
+import { isNil } from 'lodash';
+import { Ref, ref, watch } from 'vue';
 
-export type FieldTree = Record<string, FieldInfo>;
-export type FieldInfo = { name: string; field: string; children: FieldTree; collection: string; type: string };
-export type FieldOption = { name: string; field: string; key: string; children?: FieldOption[] };
+export type FieldNode = {
+	name: string;
+	field: string;
+	collection: string;
+	relatedCollection?: string;
+	key: string;
+	path: string;
+	type: Type;
+	children?: FieldNode[];
+	group?: boolean;
+	_loading?: boolean;
+};
 
 export type FieldTreeContext = {
-	tree: Ref<FieldTree>;
-	treeList: ComputedRef<FieldOption[]>;
-	loadFieldRelations: (fieldPath: string, depth?: number) => void;
-	getField: (fieldPath: string) => FieldOption | undefined;
-	treeToList: (tree: FieldTree, parentName?: string) => FieldOption[];
-	visitedRelations: Ref<string[][]>;
+	treeList: Ref<FieldNode[]>;
+	loadFieldRelations: (fieldPath: string, root?: FieldNode) => void;
+	refresh: (collection?: string) => void;
 };
 
 export function useFieldTree(
 	collection: Ref<string | null>,
-	inject?: Ref<{ fields: Field[]; relations: Relation[] } | null>,
-	filter: (field: Field) => boolean = () => true
+	inject?: Ref<{ fields: Field[]; relations?: Relation[] } | null>,
+	filter: (field: Field, parent?: FieldNode) => boolean = () => true,
 ): FieldTreeContext {
 	const fieldsStore = useFieldsStore();
 	const relationsStore = useRelationsStore();
 
-	const tree = ref<FieldTree>({});
+	const treeList = ref<FieldNode[]>([]);
+	const visitedPaths = ref<Set<string>>(new Set());
 
-	if (collection.value) {
-		tree.value = getFieldTreeForCollection(collection.value, 'any');
-	}
-
-	const visitedRelations = ref<string[][]>([]);
-
-	Object.values(tree.value).forEach((value) => {
-		loadFieldRelations(value.field);
+	// Refresh when collection or fields of the collection are updated
+	watch([collection, () => collection.value && fieldsStore.getFieldsForCollectionSorted(collection.value)], refresh, {
+		immediate: true,
 	});
 
-	const treeList = computed(() => treeToList(tree.value));
+	return { treeList, loadFieldRelations, refresh };
 
-	return { tree, treeList, loadFieldRelations, getField, treeToList, visitedRelations };
+	function refresh() {
+		visitedPaths.value = new Set();
+		treeList.value = getTree(collection.value) ?? [];
 
-	function treeToList(tree: FieldTree, parentName?: string): FieldOption[] {
-		return Object.values(tree).map((field) => {
-			const fieldName = field.type === 'm2a' ? `${field.field}:${field.collection}` : field.field;
-			const key = parentName ? `${parentName}.${fieldName}` : fieldName;
-			const children = treeToList(field.children, key);
+		for (const node of treeList.value) {
+			if (node.relatedCollection) {
+				node.children = getTree(node.relatedCollection, node);
+			}
+		}
+	}
+
+	function getTree(collection?: string | null, parent?: FieldNode) {
+		const injectedFields = inject?.value?.fields.filter((field) => field.collection === collection);
+
+		const allFields = fieldsStore
+			.getFieldsForCollectionSorted(collection!)
+			.concat(injectedFields || [])
+			.filter(
+				(field) =>
+					field.meta?.special?.includes('group') ||
+					(!field.meta?.special?.includes('alias') && !field.meta?.special?.includes('no-data')),
+			)
+			.filter((field) => filter(field, parent));
+
+		const topLevelFields = allFields.filter((field) => {
+			if (parent?.group === true) return field.meta?.group === parent?.field;
+			return isNil(field.meta?.group);
+		});
+
+		const fieldNodes = topLevelFields.flatMap((field) => makeNode(field, parent));
+
+		return fieldNodes.length ? fieldNodes : undefined;
+	}
+
+	function makeNode(field: Field, parent?: FieldNode): FieldNode | FieldNode[] {
+		const { relationType, relatedCollections } = getRelationTypeAndRelatedCollections(field);
+		const pathContext = parent?.path ? parent.path + '.' : '';
+		const keyContext = parent?.key ? parent.key + '.' : '';
+
+		if (field?.meta?.special?.includes('group')) {
+			const node: FieldNode = {
+				name: field.name,
+				field: field.field,
+				collection: field.collection,
+				relatedCollection: undefined,
+				key: parent ? parent.key : '',
+				path: pathContext + field.field,
+				group: true,
+				type: field.type,
+			};
+
+			const children = getTree(field.collection, node);
+
+			if (children) {
+				for (const child of children) {
+					if (child.relatedCollection) {
+						child.children = [
+							{ name: 'Loading...', field: '', collection: '', key: '', path: '', type: 'alias', _loading: true },
+						];
+					}
+				}
+			}
+
+			return {
+				...node,
+				children,
+			};
+		}
+
+		if (relatedCollections.length <= 1 && relationType !== 'm2a') {
 			return {
 				name: field.name,
-				key,
-				field: fieldName,
-				children: children.length > 0 ? children : undefined,
-				selectable: true,
+				field: field.field,
+				collection: field.collection,
+				relatedCollection: relatedCollections[0],
+				key: keyContext + field.field,
+				path: pathContext + field.field,
+				type: field.type,
+			};
+		}
+
+		return relatedCollections.map((collection) => {
+			return {
+				name: `${field.name} (${collection})`,
+				field: `${field.field}:${collection}`,
+				collection: field.collection,
+				relatedCollection: collection,
+				key: keyContext + `${field.field}:${collection}`,
+				path: pathContext + `${field.field}:${collection}`,
+				type: field.type,
 			};
 		});
 	}
 
-	function getFieldTreeForCollection(collection: string, type: string) {
-		const fields = [
-			...fieldsStore.getFieldsForCollection(collection),
-			...(inject?.value?.fields.filter((field) => field.collection === collection) || []),
-		]
-			.filter((field: Field) => {
-				const shown =
-					field.meta?.special?.includes('alias') !== true && field.meta?.special?.includes('no-data') !== true;
-				return shown;
-			})
-			.filter(filter);
+	function getRelationTypeAndRelatedCollections(field: Field): {
+		relationType: 'o2m' | 'm2o' | 'm2a' | null;
+		relatedCollections: string[];
+	} {
+		const relation = getRelationForField(field);
+		if (!relation?.meta) return { relationType: null, relatedCollections: [] };
+		const relationType = getRelationType({ relation, collection: field.collection, field: field.field });
 
-		return fields.reduce((acc, field) => {
-			if (type === 'm2a') {
-				const fieldName = `${field.field}:${collection}`;
-				acc[fieldName] = {
-					field: field.field,
-					name: `${field.name} (${field.collection})`,
-					collection: field.collection,
-					type,
-					children: {},
-				};
-			} else {
-				acc[field.field] = {
-					field: field.field,
-					name: field.name,
-					collection: field.collection,
-					type,
-					children: {},
-				};
-			}
-
-			return acc;
-		}, {} as FieldTree);
-	}
-
-	function getField(fieldPath: string): FieldOption | undefined {
-		const path = fieldPath.split('.');
-
-		function getFieldRecursive(path: string[], list: FieldOption[]): FieldOption | undefined {
-			const targetField = path.shift();
-			const subList = list.find((el) => el.field === targetField);
-			if (subList === undefined || subList.children === undefined) return undefined;
-			if (path.length === 0) return subList;
-			return getFieldRecursive(path, subList.children);
+		switch (relationType) {
+			case 'o2m':
+				return { relationType: 'o2m', relatedCollections: [relation!.meta!.many_collection] };
+			case 'm2o':
+				return { relationType: 'm2o', relatedCollections: [relation!.meta!.one_collection!] };
+			case 'm2a':
+				return { relationType: 'm2a', relatedCollections: relation!.meta!.one_allowed_collections! };
+			default:
+				return { relationType: null, relatedCollections: [] };
 		}
-
-		return getFieldRecursive(path, treeList.value);
 	}
 
-	function loadFieldRelations(fieldPath: string, depth = 0) {
-		_loadFieldRelations(fieldPath);
-		if (depth === 0) return;
-		const field = getField(fieldPath);
-		if (!field) return;
-
-		field.children?.forEach((child) => loadFieldRelations(child.key, depth - 1));
-	}
-
-	function _loadFieldRelations(fieldPath: string) {
-		const path = fieldPath.replaceAll('.', '.children.');
-		const field = get(tree.value, path) as FieldInfo | undefined;
-		if (field === undefined || Object.keys(field.children).length > 0) return;
-
+	function getRelationForField(field: { collection: string; field: string }) {
 		const relations = [
 			...relationsStore.getRelationsForField(field.collection, field.field),
 			...(inject?.value?.relations || []),
 		];
-		const relation = getRelation(relations, field.collection, field.field);
 
-		if (relations.length === 0 || !relation || !relation.meta) return;
-
-		if (relationVisited(relation)) return;
-
-		const relationType = getRelationType({ relation, collection: field.collection, field: field.field });
-		if (relation.meta === undefined) return;
-
-		let children: FieldTree = {};
-
-		if (relationType === 'o2m') {
-			children = getFieldTreeForCollection(relation.meta.many_collection, relationType);
-		} else if (relationType === 'm2o') {
-			children = getFieldTreeForCollection(relation.meta.one_collection, relationType);
-		} else if (relationType === 'm2a') {
-			children =
-				relation.meta.one_allowed_collections?.reduce((acc, collection) => {
-					return { ...acc, ...getFieldTreeForCollection(collection, relationType) };
-				}, {}) || {};
-		}
-
-		Object.values(children).forEach((child) => {
-			const relation: string[] = [field.collection, field.field, child.collection, child.field];
-			const exists = visitedRelations.value.findIndex((rel) => relationEquals(rel, relation)) !== -1;
-
-			if (exists === false) visitedRelations.value.push(relation);
-		});
-
-		set(tree.value, `${path}.children`, children);
-	}
-
-	function relationVisited(relation: Relation) {
-		if (!relation.meta) return;
-
-		if (relation.meta.one_collection_field !== null && relation.meta.one_allowed_collections !== null) return false;
-
-		const simpleRelation: string[] = [
-			relation.meta.many_collection,
-			relation.meta.one_collection,
-			relation.meta.many_field,
-			relation.meta.one_field || '',
-		];
-
-		return visitedRelations.value.find((relation) => relationEquals(simpleRelation, relation)) !== undefined;
-	}
-
-	function getRelation(relations: Relation[], collection: string, field: string) {
 		return relations.find(
 			(relation: Relation) =>
-				(relation.collection === collection && relation.field === field) ||
-				(relation.related_collection === collection && relation.meta?.one_field === field)
+				(relation.collection === field.collection && relation.field === field.field) ||
+				(relation.related_collection === field.collection && relation.meta?.one_field === field.field),
 		);
 	}
 
-	function relationEquals(rel1: string[], rel2: string[]) {
-		for (const rel of rel1) {
-			if (rel2.includes(rel) === false) return false;
+	function getNodeAtPath([field, ...path]: string[], root?: FieldNode[]): FieldNode | undefined {
+		if (!root?.length) return undefined;
+
+		const node = findFieldNodeInTree(field, root);
+
+		if (node && path.length) return getNodeAtPath(path, node.children);
+
+		return node;
+	}
+
+	function findFieldNodeInTree(field: string | undefined, root: FieldNode[]): FieldNode | undefined {
+		const node = root.find((node) => node.field === field);
+		if (node) return node;
+
+		const childrenNodes = root.flatMap((node) => {
+			if (node.group && node.children?.length) return node.children;
+			return [];
+		});
+
+		if (!childrenNodes?.length) return undefined;
+
+		return findFieldNodeInTree(field, childrenNodes);
+	}
+
+	function loadFieldRelations(path: string) {
+		if (!visitedPaths.value.has(path)) {
+			visitedPaths.value.add(path);
+
+			const node = getNodeAtPath(path.split('.'), treeList.value);
+
+			if (node && node.children?.length === 1 && (node.children as [FieldNode])[0]._loading) {
+				node.children = getTree(node.relatedCollection, node);
+			}
+
+			for (const child of node?.children || []) {
+				if (child?.relatedCollection) {
+					child.children = getTree(child.relatedCollection, child);
+				}
+			}
 		}
-		return true;
 	}
 }

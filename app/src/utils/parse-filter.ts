@@ -1,16 +1,25 @@
-import { useUserStore } from '@/stores';
-import { Accountability } from '@directus/shared/types';
-import { parseFilter as parseFilterShared } from '@directus/shared/utils';
+import { useUserStore } from '@/stores/user';
+import { Accountability, Filter } from '@directus/types';
+import { parseFilter as parseFilterShared } from '@directus/utils';
 
-export function parseFilter(filter: Record<string, any>): Record<string, any> {
-	const userStore = useUserStore();
+export function parseFilter(filter: Filter | null): Filter {
+	const { currentUser } = useUserStore();
 
-	if (!userStore.currentUser) return filter;
+	if (!currentUser) return filter ?? {};
+	if (!('id' in currentUser)) return filter ?? {};
 
+	// TODO should this work with policies app side? Is that a dynamic variable that we expose in other filters, that are not permissions?
 	const accountability: Accountability = {
-		role: userStore.currentUser.role.id,
-		user: userStore.currentUser.id,
-	};
+		role: currentUser.role?.id ?? null,
+		roles: currentUser.roles.map((role) => role.id),
+		user: currentUser.id,
+	} as Accountability;
 
-	return parseFilterShared(filter, accountability);
+	return (
+		parseFilterShared(filter, accountability, {
+			$CURRENT_ROLE: currentUser.role ?? undefined,
+			$CURRENT_ROLES: currentUser.roles,
+			$CURRENT_USER: currentUser,
+		}) ?? {}
+	);
 }

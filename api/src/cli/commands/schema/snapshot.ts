@@ -1,55 +1,61 @@
-import getDatabase from '../../../database';
-import logger from '../../../logger';
-import { getSnapshot } from '../../../utils/get-snapshot';
-import { constants as fsConstants, promises as fs } from 'fs';
-import path from 'path';
+import { promises as fs, constants as fsConstants } from 'fs';
 import inquirer from 'inquirer';
 import { dump as toYaml } from 'js-yaml';
-import { flushCaches } from '../../../cache';
+import path from 'path';
+import getDatabase from '../../../database/index.js';
+import { useLogger } from '../../../logger/index.js';
+import { getSnapshot } from '../../../utils/get-snapshot.js';
 
 export async function snapshot(
-	snapshotPath: string,
-	options?: { yes: boolean; format: 'json' | 'yaml' }
+	snapshotPath?: string,
+	options?: { yes: boolean; format: 'json' | 'yaml' },
 ): Promise<void> {
-	const filename = path.resolve(process.cwd(), snapshotPath);
-
-	let snapshotExists: boolean;
-
-	try {
-		await fs.access(filename, fsConstants.F_OK);
-		snapshotExists = true;
-	} catch {
-		snapshotExists = false;
-	}
-
-	if (snapshotExists && options?.yes === false) {
-		const { overwrite } = await inquirer.prompt([
-			{
-				type: 'confirm',
-				name: 'overwrite',
-				message: 'Snapshot already exists. Do you want to overwrite the file?',
-			},
-		]);
-
-		if (overwrite === false) {
-			process.exit(0);
-		}
-	}
-
-	await flushCaches();
-
 	const database = getDatabase();
-
-	const snapshot = await getSnapshot({ database });
+	const logger = useLogger();
 
 	try {
+		const snapshot = await getSnapshot({ database });
+
+		let snapshotString: string;
+
 		if (options?.format === 'yaml') {
-			await fs.writeFile(filename, toYaml(snapshot));
+			snapshotString = toYaml(snapshot);
 		} else {
-			await fs.writeFile(filename, JSON.stringify(snapshot));
+			snapshotString = JSON.stringify(snapshot);
 		}
 
-		logger.info(`Snapshot saved to ${filename}`);
+		if (snapshotPath) {
+			const filename = path.resolve(process.cwd(), snapshotPath);
+
+			let snapshotExists: boolean;
+
+			try {
+				await fs.access(filename, fsConstants.F_OK);
+				snapshotExists = true;
+			} catch {
+				snapshotExists = false;
+			}
+
+			if (snapshotExists && options?.yes === false) {
+				const { overwrite } = await inquirer.prompt([
+					{
+						type: 'confirm',
+						name: 'overwrite',
+						message: 'Snapshot already exists. Do you want to overwrite the file?',
+					},
+				]);
+
+				if (overwrite === false) {
+					database.destroy();
+					process.exit(0);
+				}
+			}
+
+			await fs.writeFile(filename, snapshotString);
+			logger.info(`Snapshot saved to ${filename}`);
+		} else {
+			process.stdout.write(snapshotString);
+		}
 
 		database.destroy();
 		process.exit(0);

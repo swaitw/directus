@@ -1,12 +1,16 @@
-import { RequestHandler } from 'express';
-import { DocumentNode, getOperationAST, parse, Source } from 'graphql';
-import { InvalidPayloadException, InvalidQueryException, MethodNotAllowedException } from '../exceptions';
-import { GraphQLParams } from '../types';
-import asyncHandler from '../utils/async-handler';
+import { parseJSON } from '@directus/utils';
+import type { RequestHandler } from 'express';
+import type { DocumentNode } from 'graphql';
+import { getOperationAST, parse, Source } from 'graphql';
+import { InvalidPayloadError, InvalidQueryError, MethodNotAllowedError } from '@directus/errors';
+import { GraphQLValidationError } from '../services/graphql/errors/validation.js';
+import type { GraphQLParams } from '../types/index.js';
+import asyncHandler from '../utils/async-handler.js';
+import { useEnv } from '@directus/env';
 
 export const parseGraphQL: RequestHandler = asyncHandler(async (req, res, next) => {
 	if (req.method !== 'GET' && req.method !== 'POST') {
-		throw new MethodNotAllowedException('GraphQL only supports GET and POST requests.', { allow: ['GET', 'POST'] });
+		throw new MethodNotAllowedError({ allowed: ['GET', 'POST'], current: req.method });
 	}
 
 	let query: string | null = null;
@@ -15,19 +19,19 @@ export const parseGraphQL: RequestHandler = asyncHandler(async (req, res, next) 
 	let document: DocumentNode;
 
 	if (req.method === 'GET') {
-		query = (req.query.query as string | undefined) || null;
+		query = (req.query['query'] as string | undefined) || null;
 
-		if (req.query.variables) {
+		if (req.query['variables']) {
 			try {
-				variables = JSON.parse(req.query.variables as string);
+				variables = parseJSON(req.query['variables'] as string);
 			} catch {
-				throw new InvalidQueryException(`Variables are invalid JSON.`);
+				throw new InvalidQueryError({ reason: `Variables are invalid JSON` });
 			}
 		} else {
 			variables = {};
 		}
 
-		operationName = (req.query.operationName as string | undefined) || null;
+		operationName = (req.query['operationName'] as string | undefined) || null;
 	} else {
 		query = req.body.query || null;
 		variables = req.body.variables || null;
@@ -35,28 +39,43 @@ export const parseGraphQL: RequestHandler = asyncHandler(async (req, res, next) 
 	}
 
 	if (query === null) {
-		throw new InvalidPayloadException('Must provide query string.');
+		throw new InvalidPayloadError({ reason: 'Must provide query string' });
 	}
 
 	try {
-		document = parse(new Source(query));
+		const env = useEnv();
+
+		document = parse(new Source(query), {
+			maxTokens: Number(env['GRAPHQL_QUERY_TOKEN_LIMIT']),
+		});
 	} catch (err: any) {
-		throw new InvalidPayloadException(`GraphQL schema validation error.`, {
-			graphqlErrors: [err],
+		throw new GraphQLValidationError({
+			errors: [err],
 		});
 	}
 
-	// You can only do `query` through GET
-	if (req.method === 'GET') {
-		const operationAST = getOperationAST(document, operationName);
-		if (operationAST?.operation !== 'query') {
-			throw new MethodNotAllowedException(`Can only perform a ${operationAST?.operation} from a POST request.`, {
-				allow: ['POST'],
-			});
-		}
+	const operationAST = getOperationAST(document, operationName);
+
+	// Mutations can't happen through GET requests
+	if (req.method === 'GET' && operationAST?.operation !== 'query') {
+		throw new MethodNotAllowedError({
+			allowed: ['POST'],
+			current: 'GET',
+		});
 	}
 
-	res.locals.graphqlParams = { document, query, variables, operationName, contextValue: { req, res } } as GraphQLParams;
+	// Prevent caching responses when mutations are made
+	if (operationAST?.operation === 'mutation') {
+		res.locals['cache'] = false;
+	}
+
+	res.locals['graphqlParams'] = {
+		document,
+		query,
+		variables,
+		operationName,
+		contextValue: { req, res },
+	} as GraphQLParams;
 
 	return next();
 });

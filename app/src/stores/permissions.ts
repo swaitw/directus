@@ -1,56 +1,76 @@
 import api from '@/api';
-import { Permission } from '@directus/shared/types';
-import { parseFilter } from '@/utils/parse-filter';
+import { CollectionPermission } from '@/types/permissions';
+import { parsePreset } from '@/utils/parse-preset';
+import { CollectionAccess, PermissionsAction } from '@directus/types';
+import { deepMap } from '@directus/utils';
+import { mapValues } from 'lodash';
 import { defineStore } from 'pinia';
 import { useUserStore } from '../stores/user';
 
 export const usePermissionsStore = defineStore({
 	id: 'permissionsStore',
 	state: () => ({
-		permissions: [] as Permission[],
+		permissions: {} as CollectionAccess,
 	}),
 	actions: {
 		async hydrate() {
 			const userStore = useUserStore();
 
-			const response = await api.get('/permissions', {
-				params: { limit: -1, filter: { role: { _eq: userStore.currentUser!.role.id } } },
-			});
+			const response = await api.get('/permissions/me');
 
-			this.permissions = response.data.data.map((rawPermission: any) => {
-				if (rawPermission.permissions) {
-					rawPermission.permissions = parseFilter(rawPermission.permissions);
-				}
+			const fields = getNestedDynamicVariableFields(response.data.data);
 
-				if (rawPermission.validation) {
-					rawPermission.validation = parseFilter(rawPermission.validation);
-				}
+			if (fields.length > 0) {
+				await userStore.hydrateAdditionalFields(fields);
+			}
 
-				if (rawPermission.presets) {
-					rawPermission.presets = parseFilter(rawPermission.presets);
-				}
+			this.permissions = mapValues(
+				response.data.data as CollectionAccess,
+				(collectionPermission: CollectionPermission) => {
+					Object.values(collectionPermission).forEach((actionPermission) => {
+						if (actionPermission.presets) {
+							actionPermission.presets = parsePreset(actionPermission.presets);
+						}
+					});
 
-				return rawPermission;
-			});
+					return collectionPermission;
+				},
+			) as CollectionAccess;
+
+			function getNestedDynamicVariableFields(rawPermissions: Record<string, CollectionPermission>) {
+				const fields = new Set<string>();
+
+				const checkDynamicVariable = (value: string) => {
+					if (typeof value !== 'string') return;
+
+					if (value.startsWith('$CURRENT_USER.')) {
+						fields.add(value.replace('$CURRENT_USER.', ''));
+					} else if (value.startsWith('$CURRENT_ROLE.')) {
+						fields.add(value.replace('$CURRENT_ROLE.', 'role.'));
+					}
+				};
+
+				Object.values(rawPermissions).forEach((collectionPermission: CollectionPermission) => {
+					Object.values(collectionPermission).forEach((actionPermission) => {
+						deepMap(actionPermission.presets, checkDynamicVariable);
+					});
+				});
+
+				return Array.from(fields);
+			}
 		},
 		dehydrate() {
 			this.$reset();
 		},
-		getPermissionsForUser(collection: string, action: Permission['action']) {
-			const userStore = useUserStore();
-			return (
-				this.permissions.find(
-					(permission) =>
-						permission.action === action &&
-						permission.collection === collection &&
-						permission.role === userStore.currentUser?.role?.id
-				) || null
-			);
+		getPermission(collection: string, action: PermissionsAction) {
+			return this.permissions[collection]?.[action] ?? null;
 		},
-		hasPermission(collection: string, action: Permission['action']) {
+		hasPermission(collection: string, action: PermissionsAction) {
 			const userStore = useUserStore();
-			if (userStore.currentUser?.role?.admin_access === true) return true;
-			return !!this.getPermissionsForUser(collection, action);
+
+			if (userStore.isAdmin) return true;
+
+			return (this.getPermission(collection, action)?.access ?? 'none') !== 'none';
 		},
 	},
 });

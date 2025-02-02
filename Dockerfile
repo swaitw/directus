@@ -1,38 +1,73 @@
-# NOTE: Testing Only. DO NOT use this in production
+# syntax=docker/dockerfile:1.4
 
-ARG NODE_VERSION=16-alpine
+ARG NODE_VERSION=22
 
-FROM node:${NODE_VERSION}
+####################################################################################################
+## Build Packages
 
-# Required to run OracleDB
-# Technically not required for the others, but I'd rather have 1 image that works for all, instead of building n images
-# per test
-#WORKDIR /tmp
-#RUN apk --no-cache add libaio libnsl libc6-compat curl && \
-#    curl -o instantclient-basiclite.zip https://download.oracle.com/otn_software/linux/instantclient/instantclient-basiclite-linuxx64.zip -SL && \
-#    unzip instantclient-basiclite.zip && \
-#    mv instantclient*/ /usr/lib/instantclient && \
-#    rm instantclient-basiclite.zip && \
-#    ln -s /usr/lib/instantclient/libclntsh.so.19.1 /usr/lib/libclntsh.so && \
-#    ln -s /usr/lib/instantclient/libocci.so.19.1 /usr/lib/libocci.so && \
-#    ln -s /usr/lib/instantclient/libociicus.so /usr/lib/libociicus.so && \
-#    ln -s /usr/lib/instantclient/libnnz19.so /usr/lib/libnnz19.so && \
-#    ln -s /usr/lib/libnsl.so.2 /usr/lib/libnsl.so.1 && \
-#    ln -s /lib/libc.so.6 /usr/lib/libresolv.so.2 && \
-#    ln -s /lib64/ld-linux-x86-64.so.2 /usr/lib/ld-linux-x86-64.so.2
-#
-#ENV ORACLE_BASE /usr/lib/instantclient
-#ENV LD_LIBRARY_PATH /usr/lib/instantclient
-#ENV TNS_ADMIN /usr/lib/instantclient
-#ENV ORACLE_HOME /usr/lib/instantclient
+FROM node:${NODE_VERSION}-alpine AS builder
+
+ARG TARGETPLATFORM
+RUN <<EOF
+  if [ "$TARGETPLATFORM" = 'linux/arm64' ]; then
+  	apk --no-cache add python3 build-base
+  	ln -sf /usr/bin/python3 /usr/bin/python
+  fi
+EOF
 
 WORKDIR /directus
 
-COPY . .
+COPY package.json .
+RUN corepack enable && corepack prepare
 
-RUN npm install
+# Deploy as 'node' user to match pnpm setups in production image
+# (see https://github.com/directus/directus/issues/23822)
+RUN chown node:node .
+USER node
 
-WORKDIR /directus/api
+ENV NODE_OPTIONS=--max-old-space-size=8192
 
-CMD ["sh", "-c", "node ./cli.js bootstrap && node ./start.js;"]
-EXPOSE 8055/tcp
+COPY pnpm-lock.yaml .
+RUN pnpm fetch
+
+COPY --chown=node:node . .
+RUN <<EOF
+	pnpm install --recursive --offline --frozen-lockfile
+	npm_config_workspace_concurrency=1 pnpm run build
+	pnpm --filter directus deploy --prod dist
+	cd dist
+	# Regenerate package.json file with essential fields only
+	# (see https://github.com/directus/directus/issues/20338)
+	node -e '
+		const f = "package.json", {name, version, type, exports, bin} = require(`./${f}`), {packageManager} = require(`../${f}`);
+		fs.writeFileSync(f, JSON.stringify({name, version, type, exports, bin, packageManager}, null, 2));
+	'
+	mkdir -p database extensions uploads
+EOF
+
+####################################################################################################
+## Create Production Image
+
+FROM node:${NODE_VERSION}-alpine AS runtime
+
+RUN npm install --global pm2@5
+
+USER node
+
+WORKDIR /directus
+
+ENV \
+	DB_CLIENT="sqlite3" \
+	DB_FILENAME="/directus/database/database.sqlite" \
+	NODE_ENV="production" \
+	NPM_CONFIG_UPDATE_NOTIFIER="false"
+
+COPY --from=builder --chown=node:node /directus/ecosystem.config.cjs .
+COPY --from=builder --chown=node:node /directus/dist .
+
+EXPOSE 8055
+
+CMD : \
+	&& node cli.js bootstrap \
+	&& pm2-runtime start ecosystem.config.cjs \
+	;

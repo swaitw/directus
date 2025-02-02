@@ -1,81 +1,98 @@
+<script setup lang="ts">
+import { useI18n } from 'vue-i18n';
+import DrawerItem from '@/views/private/components/drawer-item.vue';
+import { RelationO2M } from '@/composables/use-relation-o2m';
+import { ref } from 'vue';
+
+const props = withDefaults(
+	defineProps<{
+		collection: string;
+		template: string;
+		item: Record<string, any>;
+		edits: Record<string, any>;
+		relationInfo: RelationO2M;
+		disabled?: boolean;
+		open?: boolean;
+		deleted: boolean;
+		isLocalItem: boolean;
+	}>(),
+	{
+		disabled: false,
+		open: false,
+	},
+);
+
+const { t } = useI18n();
+const emit = defineEmits(['update:open', 'deselect', 'input']);
+const editActive = ref(false);
+</script>
+
 <template>
-	<div class="preview">
+	<div class="preview" :class="{ open, deleted }">
+		<v-icon
+			v-if="relationInfo.relatedPrimaryKeyField.field in item"
+			:name="props.open ? 'expand_more' : 'chevron_right'"
+			clickable
+			@click="emit('update:open', !props.open)"
+		/>
+
 		<render-template :collection="collection" :template="template" :item="item" />
+
 		<div class="spacer" />
-		<div v-if="!disabled" class="actions">
-			<v-icon v-tooltip="t('edit')" name="launch" clickable @click="editActive = true" />
-			<v-icon v-tooltip="t('deselect')" name="clear" clickable @click="$emit('deselect')" />
+
+		<div v-if="!disabled" class="item-actions">
+			<v-icon v-tooltip="t('edit_item')" name="edit" clickable @click="editActive = true" />
+
+			<v-remove
+				:item-type="item.$type"
+				:item-info="relationInfo"
+				:item-is-local="isLocalItem"
+				:item-edits="edits"
+				@action="$emit('deselect')"
+			/>
 		</div>
 
 		<drawer-item
 			v-model:active="editActive"
 			:collection="collection"
-			:primary-key="item[primaryKeyField] || '+'"
-			:edits="item"
-			:circular-field="parentField"
+			:primary-key="item[props.relationInfo.relatedPrimaryKeyField.field] || '+'"
+			:edits="edits"
+			:circular-field="props.relationInfo.reverseJunctionField.field"
 			@input="$emit('input', $event)"
 		/>
 	</div>
 </template>
 
-<script lang="ts">
-import { useI18n } from 'vue-i18n';
-import { defineComponent, ref } from 'vue';
-import DrawerItem from '@/views/private/components/drawer-item';
-
-export default defineComponent({
-	components: { DrawerItem },
-	props: {
-		collection: {
-			type: String,
-			required: true,
-		},
-		template: {
-			type: String,
-			required: true,
-		},
-		item: {
-			type: Object,
-			required: true,
-		},
-		primaryKeyField: {
-			type: String,
-			required: true,
-		},
-		disabled: {
-			type: Boolean,
-			default: false,
-		},
-		parentField: {
-			type: String,
-			required: true,
-		},
-	},
-	emits: ['deselect', 'input'],
-	setup() {
-		const { t } = useI18n();
-
-		const editActive = ref(false);
-		return { t, editActive };
-	},
-});
-</script>
-
 <style lang="scss" scoped>
+@use '@/styles/mixins';
+
 .preview {
 	display: flex;
+	height: var(--theme--form--field--input--height);
+	align-items: center;
 
 	.spacer {
 		flex-grow: 1;
 	}
 
-	.actions {
-		--v-icon-color: var(--foreground-subdued);
-		--v-icon-color-hover: var(--foreground-normal);
+	.row &.deleted {
+		color: var(--theme--danger);
+		background-color: var(--danger-10);
+		border-color: var(--danger-25);
 
-		.v-icon + .v-icon {
-			margin-left: 4px;
+		&:hover {
+			background-color: var(--danger-25);
+			border-color: var(--danger-50);
+		}
+
+		.item-actions .v-icon {
+			--v-icon-color: var(--danger-75);
+			--v-icon-color-hover: var(--theme--danger);
 		}
 	}
+}
+
+.item-actions {
+	@include mixins.list-interface-item-actions;
 }
 </style>
